@@ -242,13 +242,18 @@ docker compose up -d est-shim
 2. **BIG-IP objects**:
 
    ```sh
-   python3 deploy_bigip.py <bigip-mgmt-host> <user> <password> est_proxy.irule.tcl
+   python3 deploy_bigip.py <bigip-mgmt-host> <user> <password> est_proxy.irule.tcl \
+     --pool-member <backend-host>:8085 --vs-destination <vs-listener-ip>:8443 \
+     [--vs-vlan /Common/<your-vlan>]
    ```
 
-   This is idempotent — objects that already exist are reported and skipped,
-   not errored on. Edit the pool member address/port and VS
-   destination/VLAN at the top of `deploy_bigip.py` for your environment
-   before running (defaults are placeholders for a lab network).
+   No source editing required — everything environment-specific is a flag
+   (`--help` for the full list, including overriding the pool/profile/
+   iRule/VS object names if you want more than one instance side by side).
+   It's also idempotent — objects that already exist are reported and
+   skipped, not errored on; validated by running it twice against a live
+   BIG-IP and confirming the second run reports "already exists" for all
+   four objects.
 
 3. **Give the VS a real leaf certificate from a CA your EST client will
    trust**, with a CN/SAN matching the hostname you'll connect with. F5's

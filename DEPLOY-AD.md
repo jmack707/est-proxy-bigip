@@ -279,18 +279,13 @@ LDAP error), and nothing past this point will work either.
 
 ## Part 3 — Deploy the BIG-IP objects
 
-Edit the config block at the top of `deploy_bigip.py` for your environment:
-
-```python
-POOL_MEMBER = "<linux-vm-ip>:8085"
-VS_DESTINATION = "<vs-listener-ip>:8443"
-VS_VLAN = "/Common/<your-vlan>"
-```
-
-Then run it:
+Run it, pointing `--pool-member` at the Linux VM from Part 2 and
+`--vs-destination` at whatever IP:port you want the VS to listen on:
 
 ```sh
-python3 deploy_bigip.py <bigip-mgmt-host> <admin-user> <admin-password> est_proxy.irule.tcl
+python3 deploy_bigip.py <bigip-mgmt-host> <admin-user> <admin-password> est_proxy.irule.tcl \
+  --pool-member <linux-vm-ip>:8085 --vs-destination <vs-listener-ip>:8443 \
+  --vs-vlan /Common/<your-vlan>
 ```
 
 This creates the pool, a client-ssl profile (`est-clientssl`), the iRule,
