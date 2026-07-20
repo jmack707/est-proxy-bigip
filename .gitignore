@@ -1,0 +1,6 @@
+est-shim.env
+*.pem
+*.key
+*.crt
+*.pkcs7
+__pycache__/

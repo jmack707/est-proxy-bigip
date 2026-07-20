@@ -1,0 +1,15 @@
+[Unit]
+Description=EST (RFC 7030) shim over Vault/OpenBao PKI -- sits behind a BIG-IP est_proxy VS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/est-shim/est-shim.env
+ExecStart=/usr/bin/python3 /usr/local/bin/est_shim.py
+Restart=always
+RestartSec=3
+User=root
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
