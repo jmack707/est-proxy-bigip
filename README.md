@@ -158,6 +158,11 @@ system packages required) — see `requirements.txt`.
   environments with no existing Vault/OpenBao instance (e.g. F5 UDF): brings
   up a throwaway dev-mode OpenBao and wires up its PKI + an AppRole for the
   shim in one script. See "No existing Vault/OpenBao? (e.g. F5 UDF)" below.
+- **`bigip-est-enroll.py`** — since TMOS has no native EST client, this
+  drives the real `estclient` externally and installs the result onto a
+  target BIG-IP via iControl REST/`tmsh`. Supports both enrollment and
+  RFC 7030 renewal. See "Getting a BIG-IP its own certificate via EST"
+  below.
 
 ## Topology
 
@@ -274,6 +279,51 @@ estclient -r -s <vs-hostname> -p 8443 -o /tmp/est-out \
   -c /tmp/est-out/cert.pem -k /tmp/est-out/key-x-x.pem
 ```
 
+## Getting a BIG-IP its own certificate via EST (`bigip-est-enroll.py`)
+
+You can use this project's EST proxy to obtain a certificate **for a
+BIG-IP** — but note that's different from "BIG-IP enrolls itself via EST."
+**TMOS has no native EST client.** Checked against F5's own docs before
+writing this: `sys crypto cert-order-manager` only integrates with specific
+commercial CA vendor APIs (Symantec's legacy API, Comodo/Sectigo); BIG-IP
+21.1's headline new certificate-automation feature was native **ACMEv2**
+support, introduced because there was *no* built-in automated enrollment
+protocol before that release; EST doesn't appear anywhere in that release's
+notes or in BIG-IP's certificate management docs.
+
+So `bigip-est-enroll.py` is the bridge: it does the real EST exchange
+externally (via `estclient`, the same real client used throughout this
+project — not a hand-rolled approximation), then installs the result onto
+the target BIG-IP the way a human would with `tmsh`, optionally attaching it
+to a client-ssl profile. It supports both enrollment and RFC 7030 renewal
+(`simplereenroll`, reusing the previously issued cert as TLS client
+identity), so it can be the basis of a cron/systemd-timer renewal loop even
+without a native client.
+
+```sh
+# First enrollment
+python3 bigip-est-enroll.py enroll \
+  --est-host <vs-hostname> --est-port 8443 --est-cacert ca-chain.pem \
+  --common-name bigip-a.example.com \
+  --bigip-host <bigip-mgmt-ip> --bigip-user admin --bigip-pass '...' \
+  --cert-name bigip-a-cert --attach-profile <your-clientssl-profile> \
+  --save-dir ./saved
+
+# Renewal (uses simplereenroll, authenticating with the cert saved above)
+python3 bigip-est-enroll.py renew \
+  --est-host <vs-hostname> --est-port 8443 --est-cacert ca-chain.pem \
+  --existing-cert ./saved/bigip-a-cert.pem --existing-key ./saved/bigip-a-cert.key \
+  --bigip-host <bigip-mgmt-ip> --bigip-user admin --bigip-pass '...' \
+  --cert-name bigip-a-cert --attach-profile <your-clientssl-profile>
+```
+
+Validated end-to-end against a real BIG-IP VE 21.1: `enroll` installs a
+fresh `sys crypto cert`/`key` pair with the expected CN, issuer, and SAN;
+`renew` produces a genuinely new certificate (different fingerprint and
+expiration each time, confirmed by inspecting the installed object before
+and after); `--attach-profile` correctly updates a client-ssl profile's
+`cert-key-chain` to reference the new objects.
+
 ## Gotchas found the hard way
 
 Found by pulling `src/est/est_client.c` from
@@ -333,6 +383,12 @@ backend (OpenBao 2.2.0):
   authenticated user → `403`; correct credentials + matching CN → real
   certificate issued. Also validated running the shim as a container
   (`docker build` / `podman build`), not just as a host process.
+- **`bigip-est-enroll.py`** — `enroll`, `renew`, and `--attach-profile` all
+  validated against a real BIG-IP: installed `sys crypto cert`/`key`
+  objects match the requested CN/issuer/SAN, `renew` produces a genuinely
+  new certificate (different fingerprint + expiration, confirmed before/
+  after), and a client-ssl profile's `cert-key-chain` correctly updates to
+  reference the newly installed objects.
 
 ## Deploying with Active Directory (e.g. F5 UDF)
 

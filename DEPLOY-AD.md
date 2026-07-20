@@ -313,6 +313,26 @@ Install `vs.crt`/`vs.key` on the client-ssl profile via `tmsh` or the GUI
 (see the main README's "Deploying" section for the `tmsh install sys
 crypto` walkthrough).
 
+This curl-direct-to-OpenBao step is specifically for the EST proxy VS's
+*own* first certificate — a bootstrapping exception, since you can't use
+EST through a VS to get that same VS its first certificate. For **any other
+BIG-IP** (or to renew this VS's certificate later), once the EST proxy is
+up, use `bigip-est-enroll.py` from the repo root instead — it does a real
+EST enrollment (via `estclient`) and installs the result via `tmsh`, since
+TMOS has no native EST client of its own:
+
+```sh
+python3 bigip-est-enroll.py enroll \
+  --est-host <vs-hostname> --est-port 8443 --est-cacert ca-chain.pem \
+  --common-name <target-bigip-hostname> \
+  --bigip-host <target-bigip-mgmt-ip> --bigip-user admin --bigip-pass '...' \
+  --cert-name <target-bigip-hostname>-cert --attach-profile est-clientssl \
+  --save-dir ./saved
+```
+
+See the main README's "Getting a BIG-IP its own certificate via EST"
+section for the full walkthrough, including renewal.
+
 ---
 
 ## Part 4 — Test the whole chain with a real EST client
