@@ -1,9 +1,10 @@
 # est-proxy-bigip
 
 Turn an F5 BIG-IP virtual server into an **RFC 7030 (EST) proxy** in front of
-a HashiCorp Vault / OpenBao PKI backend — a working iRule, a minimal
-OpenBao-backed EST server, and a deploy script, verified end-to-end with the
-real Cisco `libest` client (`estclient`), not a curl approximation.
+a HashiCorp Vault / OpenBao PKI backend, with optional **FreeIPA or Active
+Directory** client authentication — a working iRule, a minimal, portable
+(containerized) EST server, and a deploy script, verified end-to-end with
+the real Cisco `libest` client (`estclient`), not a curl approximation.
 
 EST (Enrollment over Secure Transport) is the IETF standard for automated
 certificate enrollment used by network devices, IoT, and PKI clients that
@@ -42,7 +43,7 @@ problem. Two ways to solve it:
 |---|---|---|---|
 | `cacerts` | GET | Fetch the CA's cert chain (bootstrap trust, or just refresh it) | none |
 | `csrattrs` | GET | Server tells the client which CSR attributes it wants included (optional, rarely mandatory in practice) | none |
-| `simpleenroll` | POST | Client generates its own keypair + CSR, submits the CSR, gets back a signed cert | none required (may be gated by TLS client cert, HTTP auth, or a `challengePassword` in the CSR, depending on the deployment) |
+| `simpleenroll` | POST | Client generates its own keypair + CSR, submits the CSR, gets back a signed cert | none required by the spec (may be gated by TLS client cert, HTTP auth, or a `challengePassword` in the CSR, depending on the deployment — this project gates it with HTTP Basic auth against FreeIPA/AD, see "LDAP authentication" below) |
 | `simplereenroll` | POST | Same as `simpleenroll`, but for renewing a cert the client **already holds** | **mandatory**: the client authenticates the TLS session with its current (possibly expiring) cert |
 | `serverkeygen` | POST | Client asks the *server* to generate the keypair too (not just sign a CSR) — useful for constrained devices that can't do keygen cheaply | same as simpleenroll |
 | `fullcmc` | POST | Full CMC (RFC 5272) request/response instead of the simplified PKCS#10/PKCS#7 flow — used when you need CMC's richer semantics (multi-cert requests, POP linking, etc.) | varies |
@@ -92,6 +93,45 @@ bootstrapping/ownership-voucher scheme on top of EST for automated device
 onboarding. Neither is implemented here — this project sticks to plain
 HTTPS EST.
 
+## LDAP authentication (FreeIPA / Active Directory)
+
+RFC 7030 deliberately leaves `simpleenroll` client authentication up to the
+deployment — it's the CA operator's job to decide who's allowed to enroll,
+not the protocol's. In most real environments that's a directory service,
+not a bearer token, so `est_shim.py` can gate `simpleenroll` on an **LDAP
+bind** against FreeIPA or Active Directory before it ever talks to the CA
+backend:
+
+1. The EST client sends the request with **HTTP Basic auth**
+   (`estclient -u <user> -h <password> ...` — this maps directly onto
+   libest's built-in support for exactly this).
+2. The shim binds to the directory as that user (`LDAP_BIND_DN_TEMPLATE`,
+   substituting `{username}`) — a **successful bind is treated as
+   authentication**, no separate password check needed, since the bind
+   itself proves the password.
+3. **CN-match enforcement** (`LDAP_ENFORCE_CN_MATCH`, on by default): the
+   shim also checks that the CSR's `CN` matches the authenticated username,
+   so a valid credential for user A can't be used to mint a cert claiming to
+   be user B.
+4. `simplereenroll` is deliberately **not** gated by LDAP — it already has
+   its own authentication (the client's existing TLS cert, enforced by the
+   iRule), and RFC 7030 treats that as sufficient. Layering LDAP on top
+   would just mean checking the same identity twice through two different
+   mechanisms.
+
+Configuration is a bind-DN template, so the same code works against either
+directory — see `est-shim.env.example` for concrete FreeIPA and AD examples.
+No new BIG-IP-side configuration is needed: the iRule already passes the
+`Authorization` header straight through to the pool (it only touches
+`X-SSL-Client-*`).
+
+This was validated against a real FreeIPA server (LDAPS bind, not a mock):
+unauthenticated request → `401`; wrong password → `403`; CSR CN not matching
+the authenticated user → `403`; correct credentials + matching CN → a real
+certificate issued by the CA. The one non-stdlib dependency this adds is
+[`ldap3`](https://ldap3.readthedocs.io/) (pure Python, no `libldap`/`libsasl`
+system packages required) — see `requirements.txt`.
+
 ## What's here
 
 - **`est_proxy.irule.tcl`** — the iRule. Enforces RFC 7030 method/
@@ -101,16 +141,19 @@ HTTPS EST.
   the backend if one isn't presented), forwards the client's TLS identity to
   the backend as `X-SSL-Client-*` headers, and supports routing by an
   optional EST `{label}` path segment to multiple backend CAs.
-- **`est_shim.py`** — a small, dependency-free (stdlib only) Python EST
-  server. Implements `cacerts`/`simpleenroll`/`simplereenroll`/`serverkeygen`
-  by translating to a Vault/OpenBao PKI secrets engine's HTTP API
-  (`issue`/`sign`/`ca_chain`). Runs behind the BIG-IP VS over plain HTTP —
-  TLS is terminated at the VS.
+- **`est_shim.py`** — a small Python EST server (one optional dependency:
+  `ldap3`, only needed if `LDAP_ENABLED=true`). Implements `cacerts`/
+  `simpleenroll`/`simplereenroll`/`serverkeygen` by translating to a
+  Vault/OpenBao PKI secrets engine's HTTP API (`issue`/`sign`/`ca_chain`),
+  with optional FreeIPA/AD client authentication (see below). Runs behind
+  the BIG-IP VS over plain HTTP — TLS is terminated at the VS.
 - **`deploy_bigip.py`** — a one-off iControl REST script that creates the
   BIG-IP pool, a `client-ssl` profile (`peerCertMode: request`), the iRule,
   and the virtual server (SNAT automap).
 - **`est-shim.service`** / **`est-shim.env.example`** — systemd unit + config
-  template for running the shim as a backend service.
+  template for running the shim as a plain host process.
+- **`Dockerfile`** / **`requirements.txt`** — for running the shim as a
+  container instead (same env-var configuration either way).
 
 ## Topology
 
@@ -127,9 +170,9 @@ EST client --> BIG-IP virtual server (TLS)
 
 ## Deploying
 
-1. **Backend**: put `est_shim.py` somewhere reachable from the BIG-IP pool
-   member network, configure `est-shim.env` (see `.env.example`) with an
-   AppRole (or any Vault/OpenBao auth method you can adapt `bao_login()` to)
+1. **Backend**: run `est_shim.py` somewhere reachable from the BIG-IP pool
+   member network, configured (see `est-shim.env.example`) with a Vault/
+   OpenBao AppRole (or any auth method you can adapt `bao_login()` to)
    scoped to:
    - `<pki_mount>/ca_chain` (unauthenticated `GET`, no policy needed) — used
      by `cacerts`.
@@ -138,7 +181,21 @@ EST client --> BIG-IP virtual server (TLS)
      `simplereenroll` (signs the client's own CSR, unlike `issue` which
      generates a fresh keypair).
 
-   Run it as `est-shim.service` (systemd unit provided).
+   and, if you want FreeIPA/AD-gated enrollment, `LDAP_ENABLED=true` +
+   `LDAP_URI`/`LDAP_BIND_DN_TEMPLATE` (see "LDAP authentication" above).
+
+   Two ways to run it:
+   ```sh
+   # plain host process
+   pip install -r requirements.txt   # only strictly needed if LDAP_ENABLED
+   cp est-shim.env.example /etc/est-shim/est-shim.env   # edit it, then:
+   sudo cp est-shim.service /etc/systemd/system/
+   sudo systemctl enable --now est-shim
+
+   # or as a container
+   docker build -t est-shim .
+   docker run -d --name est-shim -p 8085:8085 --env-file est-shim.env est-shim
+   ```
 
 2. **BIG-IP objects**:
 
@@ -228,6 +285,12 @@ backend (OpenBao 2.2.0):
   from the iRule, before the backend is ever reached) is confirmed too.
 - `serverkeygen` — backend logic works (verified with curl); the real EST
   client's multipart parsing needs more work (see gotcha #5).
+- **LDAP authentication** — validated against a real FreeIPA server (LDAPS
+  bind, not a mock): unauthenticated `simpleenroll` → `401`; wrong
+  credentials → `403`; correct credentials but CSR CN not matching the
+  authenticated user → `403`; correct credentials + matching CN → real
+  certificate issued. Also validated running the shim as a container
+  (`docker build` / `podman build`), not just as a host process.
 
 ## License
 

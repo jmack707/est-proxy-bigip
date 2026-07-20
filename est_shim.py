@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Minimal RFC 7030 EST server, backed by OpenBao pki_int.
+"""Minimal RFC 7030 EST server, backed by OpenBao/Vault pki, with optional
+LDAP (FreeIPA or Active Directory) client authentication.
 
 Speaks the subset of EST BIG-IP's est_proxy iRule proxies: cacerts,
 simpleenroll, simplereenroll, serverkeygen. TLS is terminated at the BIG-IP
-VS; this listens plain HTTP behind it. stdlib-only (uses the system openssl
-binary for PKCS#7 degenerate-certs-only packaging, which cryptography's
-pkcs7 module can't produce).
+VS; this listens plain HTTP behind it. Only non-stdlib dependency is
+`ldap3` (pure Python, no C bindings), and only imported when LDAP_ENABLED.
+Uses the system openssl binary for PKCS#7 degenerate-certs-only packaging,
+which cryptography's pkcs7 module can't produce.
 """
 import base64
 import http.server
@@ -25,7 +27,56 @@ PKI_MOUNT = os.environ.get("PKI_MOUNT", "pki_int")
 PKI_ROLE = os.environ.get("PKI_ROLE", "example-dot-com")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8085"))
 
+# --- optional LDAP (FreeIPA / Active Directory) client authentication ---
+# Gates simpleenroll (not simplereenroll, which already authenticates via the
+# client's existing TLS cert per RFC 7030 -- that's the protocol's own
+# reenroll trust chain, not something LDAP needs to duplicate).
+LDAP_ENABLED = os.environ.get("LDAP_ENABLED", "false").lower() == "true"
+LDAP_URI = os.environ.get("LDAP_URI", "ldaps://127.0.0.1:636")
+# {username} is substituted with the HTTP-Basic-Auth username. Examples:
+#   FreeIPA: uid={username},cn=users,cn=accounts,dc=example,dc=com
+#   AD:      {username}@example.com   (UPN bind -- simplest against AD)
+#   AD alt:  CN={username},CN=Users,DC=example,DC=com
+LDAP_BIND_DN_TEMPLATE = os.environ.get("LDAP_BIND_DN_TEMPLATE", "{username}")
+LDAP_START_TLS = os.environ.get("LDAP_START_TLS", "false").lower() == "true"
+# Which EST operations require LDAP auth (comma-separated).
+LDAP_REQUIRE_OPS = set(os.environ.get("LDAP_REQUIRE_OPS", "simpleenroll").split(","))
+# Reject if the authenticated username doesn't match the CSR's CN -- stops
+# user A, once authenticated, from requesting a cert identifying user B.
+LDAP_ENFORCE_CN_MATCH = os.environ.get("LDAP_ENFORCE_CN_MATCH", "true").lower() == "true"
+
 _ssl_ctx = ssl._create_unverified_context()  # OpenBao uses the Lab CA; shim trusts it by design (internal-only listener)
+
+
+def ldap_authenticate(username, password):
+    """Bind as the user against FreeIPA or AD. Returns (ok, detail)."""
+    import ldap3  # imported lazily so LDAP_ENABLED=false needs no extra dependency
+    bind_dn = LDAP_BIND_DN_TEMPLATE.format(username=username)
+    server = ldap3.Server(LDAP_URI, use_ssl=LDAP_URI.startswith("ldaps://"))
+    try:
+        conn = ldap3.Connection(server, user=bind_dn, password=password)
+        if LDAP_START_TLS:
+            conn.open()
+            if not conn.start_tls():
+                return False, "STARTTLS negotiation failed"
+        if not conn.bind():
+            return False, f"bind failed: {conn.result.get('description', 'unknown')}"
+        conn.unbind()
+        return True, "ok"
+    except ldap3.core.exceptions.LDAPException as e:
+        return False, f"LDAP error: {e}"
+
+
+def csr_common_name(csr_pem):
+    out = subprocess.run(
+        ["openssl", "req", "-noout", "-subject", "-nameopt", "sep_multiline,utf8"],
+        input=csr_pem.encode(), capture_output=True, check=True,
+    )
+    for line in out.stdout.decode().splitlines():
+        line = line.strip()
+        if line.startswith("CN="):
+            return line[3:]
+    return None
 
 
 def bao_request(method, path, token=None, body=None):
@@ -147,6 +198,23 @@ class ESTHandler(http.server.BaseHTTPRequestHandler):
             self._send(401, "text/plain", b"reenroll requires client cert (X-SSL-Client-Cert missing)")
             return
 
+        ldap_username = None
+        if LDAP_ENABLED and op in LDAP_REQUIRE_OPS:
+            auth = self.headers.get("Authorization", "")
+            if not auth.startswith("Basic "):
+                self._send(401, "text/plain", b"LDAP auth required (HTTP Basic)",
+                           {"WWW-Authenticate": 'Basic realm="EST"'})
+                return
+            try:
+                ldap_username, ldap_password = base64.b64decode(auth[6:]).decode().split(":", 1)
+            except Exception:
+                self._send(400, "text/plain", b"malformed Authorization header")
+                return
+            ok, detail = ldap_authenticate(ldap_username, ldap_password)
+            if not ok:
+                self._send(403, "text/plain", f"LDAP authentication failed: {detail}".encode())
+                return
+
         try:
             token = bao_login()
         except Exception as e:
@@ -159,6 +227,12 @@ class ESTHandler(http.server.BaseHTTPRequestHandler):
             except subprocess.CalledProcessError as e:
                 self._send(400, "text/plain", f"bad CSR: {e.stderr}".encode())
                 return
+            if ldap_username and LDAP_ENFORCE_CN_MATCH:
+                cn = csr_common_name(csr_pem)
+                if cn != ldap_username:
+                    self._send(403, "text/plain",
+                               f"CSR CN '{cn}' does not match authenticated LDAP user '{ldap_username}'".encode())
+                    return
             try:
                 signed = bao_request("POST", f"{PKI_MOUNT}/sign/{PKI_ROLE}", token=token,
                                       body={"csr": csr_pem})

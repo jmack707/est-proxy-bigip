@@ -1,0 +1,4 @@
+# Only needed when LDAP_ENABLED=true (FreeIPA/AD client authentication).
+# Pure Python, no C bindings -- portable across the container image below
+# and any plain host install (pip install -r requirements.txt).
+ldap3>=2.9,<3
