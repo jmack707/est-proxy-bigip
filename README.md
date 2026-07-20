@@ -11,6 +11,87 @@ need something more structured than ACME. BIG-IP doesn't speak EST natively;
 this project makes a VS behave like one by terminating/inspecting TLS at the
 iRule layer and translating the RFC 7030 operations to a CA backend.
 
+## EST overview (RFC 7030)
+
+EST is the IETF's HTTPS-based certificate enrollment protocol — think of it
+as ACME's older, more enterprise/PKI-flavored sibling. It's what a lot of
+network gear (routers, switches, IoT, 802.1X supplicants) uses to get and
+renew certificates from a CA automatically, without a human copying files
+around. Everything below maps directly onto a piece of this project.
+
+**Trust model.** Before a client can talk to an EST server it needs some way
+to trust it — RFC 7030 calls this the "explicit TA database" bootstrap
+problem. Two ways to solve it:
+- *Implicit trust anchor*: the client already has a CA cert it trusts (e.g.
+  baked in at manufacture time, or from a previous enrollment) and uses it
+  to verify the EST server's TLS cert directly.
+- *Explicit trust anchor via `/cacerts`*: the client connects with **some**
+  minimal trust (often just "accept anything for this one bootstrap call"),
+  fetches the CA's cert chain over `GET /cacerts`, and then re-verifies
+  everything from that point on using the freshly-retrieved chain.
+
+  This project's [`est_shim.py`](est_shim.py) implements `/cacerts` by
+  proxying to the CA backend's `ca_chain` endpoint; see gotcha #4 below for
+  why the *server's* leaf cert also has to satisfy a real hostname check —
+  fetching the CA chain doesn't relax that.
+
+**Core operations** (all under `/.well-known/est/`, optionally
+`/.well-known/est/{label}/...` — see "labels" below):
+
+| Operation | Method | Purpose | Client auth |
+|---|---|---|---|
+| `cacerts` | GET | Fetch the CA's cert chain (bootstrap trust, or just refresh it) | none |
+| `csrattrs` | GET | Server tells the client which CSR attributes it wants included (optional, rarely mandatory in practice) | none |
+| `simpleenroll` | POST | Client generates its own keypair + CSR, submits the CSR, gets back a signed cert | none required (may be gated by TLS client cert, HTTP auth, or a `challengePassword` in the CSR, depending on the deployment) |
+| `simplereenroll` | POST | Same as `simpleenroll`, but for renewing a cert the client **already holds** | **mandatory**: the client authenticates the TLS session with its current (possibly expiring) cert |
+| `serverkeygen` | POST | Client asks the *server* to generate the keypair too (not just sign a CSR) — useful for constrained devices that can't do keygen cheaply | same as simpleenroll |
+| `fullcmc` | POST | Full CMC (RFC 5272) request/response instead of the simplified PKCS#10/PKCS#7 flow — used when you need CMC's richer semantics (multi-cert requests, POP linking, etc.) | varies |
+
+  [`est_proxy.irule.tcl`](est_proxy.irule.tcl) enforces the method +
+  content-type rules from this table per-operation, and specifically
+  enforces the `simplereenroll` client-auth requirement by checking
+  `SSL::cert count` and returning `401` before the request ever reaches the
+  backend if no client cert was presented during the TLS handshake — this is
+  the one operation the protocol says the *server* must not skip
+  authentication on. `est_shim.py` implements `cacerts` / `simpleenroll` /
+  `simplereenroll` / `serverkeygen`; `csrattrs` returns an empty response
+  (technically valid — it's optional) and `fullcmc` isn't implemented (CMC
+  is a materially different encoding, out of scope here).
+
+**HTTP transport encoding.** EST bodies aren't sent as raw binary or JSON —
+they use MIME types borrowed from S/MIME:
+- CSRs (`simpleenroll`/`simplereenroll`/`serverkeygen` requests):
+  `Content-Type: application/pkcs10`, body = base64-encoded DER PKCS#10.
+- Certs and CA chains (`cacerts` responses, successful enroll/reenroll
+  responses): `Content-Type: application/pkcs7-mime; smime-type=certs-only`,
+  body = base64-encoded **degenerate PKCS#7** — a `SignedData` structure
+  with no actual signature, just a `certificates` field used as a container
+  to carry one or more X.509 certs. (`est_shim.py`'s `pkcs7_degenerate()`
+  shells out to `openssl crl2pkcs7 -nocrl` to build this — `cryptography`'s
+  Python bindings can't produce a degenerate PKCS#7 directly.)
+- `serverkeygen` responses need to carry back **both** a cert and a private
+  key, so they're `multipart/mixed`: one part `application/pkcs7-mime`
+  (the cert), one part `application/pkcs8` (the key) — see gotcha #5 for the
+  current limitation there.
+- Per spec, all of the above should also carry `Content-Transfer-Encoding:
+  base64`. See gotcha #3 for a real-world parser quirk this triggers.
+
+**Labels / multiple CAs.** RFC 7030 allows an optional path segment —
+`/.well-known/est/{label}/simpleenroll` instead of
+`/.well-known/est/simpleenroll` — so one EST server (or, here, one BIG-IP
+VS) can front multiple distinct CAs/policies by label. `est_proxy.irule.tcl`
+parses this segment and looks it up in a `static::est_label_pools` array,
+routing each label to a different backend pool; `est_shim.py` also parses it
+(currently informational — extending it to select a different PKI mount/role
+per label on the backend side is a natural next step, not yet wired up).
+
+**Adjacent-but-out-of-scope specs**, for context if you go looking: **EST-coaps**
+(RFC 9148) adapts the same operations to CoAP for very constrained
+IoT devices instead of HTTPS; **BRSKI** (RFC 8995) builds a zero-touch
+bootstrapping/ownership-voucher scheme on top of EST for automated device
+onboarding. Neither is implemented here — this project sticks to plain
+HTTPS EST.
+
 ## What's here
 
 - **`est_proxy.irule.tcl`** — the iRule. Enforces RFC 7030 method/
