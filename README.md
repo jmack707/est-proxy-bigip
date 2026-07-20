@@ -154,6 +154,10 @@ system packages required) — see `requirements.txt`.
   template for running the shim as a plain host process.
 - **`Dockerfile`** / **`requirements.txt`** — for running the shim as a
   container instead (same env-var configuration either way).
+- **`docker-compose.yml`** / **`bootstrap-openbao-dev.sh`** — for
+  environments with no existing Vault/OpenBao instance (e.g. F5 UDF): brings
+  up a throwaway dev-mode OpenBao and wires up its PKI + an AppRole for the
+  shim in one script. See "No existing Vault/OpenBao? (e.g. F5 UDF)" below.
 
 ## Topology
 
@@ -166,6 +170,39 @@ EST client --> BIG-IP virtual server (TLS)
                X-SSL-Client-* header injection)
             -> pool -> est_shim.py (plain HTTP)
             -> Vault/OpenBao PKI secrets engine (issue/sign/ca_chain)
+```
+
+## No existing Vault/OpenBao? (e.g. F5 UDF)
+
+`est_shim.py` talks to any Vault-API-compatible PKI backend — it doesn't
+care whether that's a real production Vault cluster or a five-second
+throwaway instance. If you're building this in an environment like F5 UDF
+that doesn't already have one, `bootstrap-openbao-dev.sh` stands up a
+**dev-mode** OpenBao (in-memory, auto-unsealed, no init/unseal ceremony) and
+wires up a root CA, intermediate CA, signing role, and a scoped AppRole for
+the shim — everything `est_shim.py` needs — in one shot. Every command in
+it was validated against a real OpenBao 2.2.0 instance before being
+committed here, not copied from docs and assumed correct.
+
+**This is a lab/demo-only choice, not a production one** — dev mode stores
+everything in memory (nothing survives a restart) and starts with a single,
+known root token. Fine for a UDF blueprint that gets torn down and rebuilt
+regularly; not fine for anything that needs to persist or be trusted beyond
+that.
+
+```sh
+docker compose up -d openbao          # or: podman run -d --network host \
+                                       #     -e BAO_DEV_ROOT_TOKEN_ID=root \
+                                       #     ghcr.io/openbao/openbao:2.2.0 server -dev
+
+BAO_ADDR=http://127.0.0.1:8200 ./bootstrap-openbao-dev.sh your-domain.com
+# prints BAO_ROLE_ID / BAO_SECRET_ID / PKI_ROLE -- paste them into est-shim.env
+
+curl -s http://127.0.0.1:8200/v1/pki_int/ca_chain > ca-chain.pem
+# this is your EST_OPENSSL_CACERT for testing, and what you issue the VS's
+# own certificate from (see "Deploying" step 3 below)
+
+docker compose up -d est-shim
 ```
 
 ## Deploying
@@ -285,6 +322,11 @@ backend (OpenBao 2.2.0):
   from the iRule, before the backend is ever reached) is confirmed too.
 - `serverkeygen` — backend logic works (verified with curl); the real EST
   client's multipart parsing needs more work (see gotcha #5).
+- **`bootstrap-openbao-dev.sh`** — every command run end-to-end against a
+  fresh dev-mode OpenBao 2.2.0 instance: root CA generated, intermediate CA
+  generated + signed + set, signing role created, AppRole created, and the
+  resulting credentials handed to a live `est_shim.py` which successfully
+  served `cacerts` and `simpleenroll` (`openssl verify` clean) using them.
 - **LDAP authentication** — validated against a real FreeIPA server (LDAPS
   bind, not a mock): unauthenticated `simpleenroll` → `401`; wrong
   credentials → `403`; correct credentials but CSR CN not matching the
