@@ -334,6 +334,13 @@ backend (OpenBao 2.2.0):
   certificate issued. Also validated running the shim as a container
   (`docker build` / `podman build`), not just as a host process.
 
+## Deploying with Active Directory (e.g. F5 UDF)
+
+[**`DEPLOY-AD.md`**](DEPLOY-AD.md) is a full walkthrough for a new engineer
+deploying this in an F5 UDF blueprint (BIG-IP + AD + a client VM) — AD-side
+LDAPS setup, standing up OpenBao from scratch since UDF doesn't provide one,
+and testing the whole chain, with a topology diagram.
+
 ## License
 
 MIT — see `LICENSE`.
