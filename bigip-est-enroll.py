@@ -27,20 +27,13 @@ saved on a prior run, via --save-dir):
 """
 import argparse
 import base64
-import json
 import os
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
-import urllib.error
-import urllib.request
 
-
-def die(msg):
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(1)
+from bigip_lib import die, install_cert
 
 
 def run_estclient(args, cacert, env_extra=None):
@@ -111,76 +104,6 @@ def enroll(args):
     return cert_pem, key_pem
 
 
-def bigip_client(host, user, password):
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    auth = base64.b64encode(f"{user}:{password}".encode()).decode()
-
-    def req(method, path, data=None, extra_headers=None, ctype="application/json"):
-        headers = {"Authorization": f"Basic {auth}"}
-        if extra_headers:
-            headers.update(extra_headers)
-        if data is not None and ctype:
-            headers["Content-Type"] = ctype
-        r = urllib.request.Request(f"https://{host}{path}", data=data, method=method, headers=headers)
-        try:
-            with urllib.request.urlopen(r, context=ctx, timeout=60) as resp:
-                return resp.status, resp.read()
-        except urllib.error.HTTPError as e:
-            return e.code, e.read()
-
-    return req
-
-
-def upload_to_bigip(req, filename, content_bytes):
-    size = len(content_bytes)
-    chunk = 512 * 1024
-    start = 0
-    while start < size:
-        end = min(start + chunk, size)
-        st, body = req("POST", f"/mgmt/shared/file-transfer/uploads/{filename}",
-                        data=content_bytes[start:end],
-                        extra_headers={"Content-Range": f"{start}-{end - 1}/{size}"},
-                        ctype="application/octet-stream")
-        if st not in (200, 202):
-            die(f"upload of {filename} failed @{start}: HTTP {st} {body[:300]}")
-        start = end
-
-
-def tmsh(req, command):
-    st, body = req("POST", "/mgmt/tm/util/bash",
-                    data=json.dumps({"command": "run", "utilCmdArgs": f'-c "{command}"'}).encode())
-    if st != 200:
-        die(f"tmsh command failed: HTTP {st} {body[:400]}\ncommand: {command}")
-    result = json.loads(body).get("commandResult", "")
-    if "01070" in result or "error" in result.lower():
-        print(f"WARNING: tmsh may have failed: {result}", file=sys.stderr)
-    return result
-
-
-def install_on_bigip(args, cert_pem, key_pem):
-    req = bigip_client(args.bigip_host, args.bigip_user, args.bigip_pass)
-
-    cert_file = f"{args.cert_name}.crt"
-    key_file = f"{args.cert_name}.key"
-    upload_to_bigip(req, cert_file, cert_pem.encode())
-    upload_to_bigip(req, key_file, key_pem.encode())
-
-    print(tmsh(req, f"tmsh install sys crypto cert {args.cert_name} from-local-file "
-                     f"/var/config/rest/downloads/{cert_file}"))
-    print(tmsh(req, f"tmsh install sys crypto key {args.cert_name} from-local-file "
-                     f"/var/config/rest/downloads/{key_file}"))
-
-    if args.attach_profile:
-        print(tmsh(req, f"tmsh modify ltm profile client-ssl {args.attach_profile} "
-                         f"cert-key-chain replace-all-with {{ default {{ cert {args.cert_name} "
-                         f"key {args.cert_name} }} }}"))
-        print(f"Attached to client-ssl profile '{args.attach_profile}'.")
-
-    print(f"Installed sys crypto cert/key '{args.cert_name}' on {args.bigip_host}.")
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("mode", choices=["enroll", "renew"])
@@ -208,7 +131,8 @@ def main():
         die("estclient not found -- install it (Debian/Ubuntu: apt install libest-utils)")
 
     cert_pem, key_pem = enroll(args)
-    install_on_bigip(args, cert_pem, key_pem)
+    install_cert(args.bigip_host, args.bigip_user, args.bigip_pass,
+                 args.cert_name, cert_pem, key_pem, args.attach_profile)
 
 
 if __name__ == "__main__":

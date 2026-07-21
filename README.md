@@ -12,6 +12,33 @@ need something more structured than ACME. BIG-IP doesn't speak EST natively;
 this project makes a VS behave like one by terminating/inspecting TLS at the
 iRule layer and translating the RFC 7030 operations to a CA backend.
 
+## Quickstart
+
+No existing Vault/OpenBao? No BIG-IP objects deployed yet? One file, one
+script:
+
+```sh
+cp deploy.env.example deploy.env   # fill in your BIG-IP/backend/AD details
+./quickstart.sh
+```
+
+This runs the entire stack up to a testable state non-interactively: starts
+a throwaway dev-mode OpenBao, bootstraps its PKI, configures + starts the
+EST shim, deploys the BIG-IP pool/profile/iRule/VS, and issues + installs
+the VS's own bootstrap certificate. Safe to re-run (idempotent). See
+"Getting a BIG-IP its own certificate via EST" and `DEPLOY-AD.md` for what
+it's doing under the hood, and for the still-manual pieces (AD/LDAPS setup,
+testing with `estclient`).
+
+Validated end-to-end on real infrastructure (not just unit-tested in
+isolation): a full run against a live BIG-IP VE 21.1 and a real FreeIPA
+server, followed by a real `estclient` `cacerts` and LDAP-gated
+`simpleenroll` through the resulting VS, both succeeding. Three real bugs
+were found and fixed this way that would NOT have been caught by reading
+the code — see "Gotchas found the hard way" below for two BIG-IP `tmsh`/
+bash quirks, plus a bash parameter-expansion gotcha specific to this
+script.
+
 ## EST overview (RFC 7030)
 
 EST is the IETF's HTTPS-based certificate enrollment protocol — think of it
@@ -163,6 +190,16 @@ system packages required) — see `requirements.txt`.
   target BIG-IP via iControl REST/`tmsh`. Supports both enrollment and
   RFC 7030 renewal. See "Getting a BIG-IP its own certificate via EST"
   below.
+- **`bigip_lib.py`** — shared iControl REST helpers (upload a file, run a
+  `tmsh` command, install+attach a cert/key) used by both
+  `bigip-est-enroll.py` and `install-cert-bigip.py`, so the BIG-IP-side
+  logic exists in exactly one place.
+- **`install-cert-bigip.py`** — installs a PEM cert/key pair you already
+  have onto a BIG-IP (not via EST) — used by `quickstart.sh` for the VS's
+  own bootstrap certificate, or standalone for anything else.
+- **`deploy.env.example`** / **`quickstart.sh`** — one config file + one
+  script that runs the whole stack above end-to-end. See "Quickstart" at
+  the top of this file.
 
 ## Topology
 
@@ -361,6 +398,34 @@ parsing code rather than guessing:
    accept the current framing (`estclient -q` completes the EST exchange but
    fails parsing the returned private key back into an OpenSSL key object).
    `cacerts`/`simpleenroll`/`simplereenroll` are unaffected.
+
+Found while building and validating `quickstart.sh` end-to-end (not by
+inspection — these only showed up under a real run):
+
+6. **Bash's `${VAR:-default}` shorthand mis-parses when `default` itself
+   contains a literal `}`** (e.g. `${LDAP_BIND_DN_TEMPLATE:-{username}}`).
+   Bash's parser closes the expansion at the *first* `}` — right after
+   `username` — and leaves the second `}` as a stray literal character
+   appended to the value. Confirmed empirically (`FOO="a"; echo
+   "${FOO:-{x}}"` prints `a}`, not `a`). This silently corrupted
+   `LDAP_BIND_DN_TEMPLATE` and crashed the shim's LDAP bind with `ValueError:
+   Single '}' encountered in format string`. Fixed by avoiding the shorthand
+   for this one variable (`quickstart.sh` uses an explicit `if [ -z ... ]`
+   instead).
+7. **`tmsh install sys crypto cert/key <name> from-local-file` is not a
+   reliable overwrite** when `<name>` already exists and is attached to a
+   client-ssl profile — re-running against the same name produced a real
+   `profile ... key(...) and certificate(...) do not match` error, i.e. a
+   genuinely broken cert/key pairing on the device, not just a warning.
+   `bigip_lib.install_cert()` now always does a clean detach (repoint the
+   profile to `default.crt`/`default.key` first) → delete → install →
+   reattach, rather than installing over a possibly-existing object in place.
+8. **Rootless Podman containers die when the SSH session that started them
+   ends**, unless the user has `loginctl enable-linger <user>` set — a
+   `docker compose up -d` that looks successful can silently disappear
+   between one command and the next. Worth setting on any host that'll run
+   `quickstart.sh` and then be left unattended (which is the whole point of
+   `-d`).
 
 ## Status
 

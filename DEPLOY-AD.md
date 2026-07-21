@@ -87,6 +87,32 @@ If any of these are unfamiliar, read this section; if not, skip to Part 0.
 - Network reachability: BIG-IP → the Linux VM (pool traffic), Linux VM → the
   DC on port 636, and your test client → the BIG-IP VS.
 - `git clone https://github.com/jmack707/est-proxy-bigip` on the Linux VM.
+- If you're on **Podman** (not Docker), run `sudo loginctl enable-linger
+  $(whoami)` on the Linux VM first — rootless Podman containers otherwise
+  die the moment your SSH session ends, which is easy to mistake for a
+  script bug. `quickstart.sh` (below) checks for this and warns, but it's
+  one less thing to hit.
+
+---
+
+## Fast path: one file, one script
+
+Parts 0–3 below (OpenBao, the shim, and the BIG-IP deploy) can be done in
+one shot instead of by hand:
+
+```sh
+cp deploy.env.example deploy.env   # fill in your BIG-IP/AD/domain details
+./quickstart.sh
+```
+
+This is validated end-to-end against real infrastructure (a live BIG-IP,
+a real directory server) — see the main README's "Quickstart" section for
+what it actually does and the bugs that surfaced (and got fixed) building
+it. Part 1 (AD/LDAPS setup) still needs to happen on the AD side first
+(it's not something a script on the Linux VM can do for you), and Part 4
+(testing with `estclient`) is still manual. If you want to understand
+*what* the script is doing, or something about your environment doesn't
+fit its assumptions, Parts 0–3 below walk through the same steps by hand.
 
 ---
 
