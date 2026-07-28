@@ -17,7 +17,7 @@ Six entry points. Run them in this order the first time:
 
 ## `quickstart.sh`
 
-Drives Parts 0–3 of the AD walkthrough non-interactively: dev-mode OpenBao, PKI bootstrap, shim configuration and start, BIG-IP object deploy, and the virtual server's own bootstrap certificate.
+Drives Parts 0, 2, and 3 of the AD walkthrough non-interactively: dev-mode OpenBao, PKI bootstrap, shim configuration and start, BIG-IP object deploy, and the virtual server's own bootstrap certificate. Part 1 (AD/LDAPS) and Part 4 (testing with `estclient`) stay manual.
 
 ```bash
 cp deploy.env.example deploy.env    # fill in every value
@@ -25,8 +25,6 @@ cp deploy.env.example deploy.env    # fill in every value
 ```
 
 Reads `deploy.env` from the working directory; takes no flags. Re-running is safe: the OpenBao bootstrap and the BIG-IP deploy are both idempotent, and the bootstrap certificate step re-issues a fresh certificate each run. Exits non-zero when a required variable is empty or when `VS_HOSTNAME` falls outside the PKI role's `allowed_domains`.
-
-Still manual afterwards: AD/LDAPS setup, and testing with `estclient`.
 
 ## `bootstrap-openbao-dev.sh`
 

@@ -27,7 +27,7 @@ Labels: the iRule looks the label up in `static::est_label_pools` and selects th
 | Code | Returned when | Returned by |
 |---|---|---|
 | `200` | operation succeeded | backend |
-| `400` | request `Content-Type` is neither `application/pkcs10` nor `multipart/*` | iRule |
+| `400` | request `Content-Type` is neither `application/pkcs10` nor `multipart/*` — checked for `simpleenroll`, `fullcmc`, and `serverkeygen`, but **not** for `simplereenroll`, where only the method and client certificate are enforced | iRule |
 | `400` | `Authorization` header is malformed, or the CSR fails to parse | backend |
 | `401` | `simplereenroll` with no client certificate in the TLS handshake | iRule, before the backend is reached |
 | `401` | `simplereenroll` reaches the backend without `X-SSL-Client-Cert`, or Basic auth is required and absent (with `WWW-Authenticate: Basic realm="EST"`) | backend |

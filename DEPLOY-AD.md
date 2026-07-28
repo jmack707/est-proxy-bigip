@@ -146,7 +146,7 @@ BAO_ADDR=http://127.0.0.1:8200 ./bootstrap-openbao-dev.sh example.com
 
 It prints output like this — you'll paste it into `est-shim.env` in Part 2:
 
-```
+```text
 BAO_ADDR=http://127.0.0.1:8200
 BAO_ROLE_ID=<generated>
 BAO_SECRET_ID=<generated>

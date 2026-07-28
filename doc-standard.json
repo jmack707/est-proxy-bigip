@@ -7,6 +7,7 @@
       "README.md",
       "CONTRIBUTING.md",
       "CHANGELOG.md",
+      "DEPLOY-AD.md",
       "docs/**/*.md"
     ],
     "exclude_dirs": [

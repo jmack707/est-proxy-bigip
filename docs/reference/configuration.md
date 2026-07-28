@@ -33,10 +33,11 @@ Precedence inside a container: `--env-file` values are overridden by explicit `-
 
 ## deploy.env — quickstart (`quickstart.sh`)
 
-`DOMAIN`, `LDAP_ENABLED`, `LDAP_URI`, `LDAP_BIND_DN_TEMPLATE`, `LDAP_START_TLS`, and `LDAP_ENFORCE_CN_MATCH` carry the meanings above and are passed through into the generated `est-shim.env`. `LDAP_REQUIRE_OPS` is not settable here; it takes the shim default.
+`LDAP_ENABLED`, `LDAP_URI`, `LDAP_BIND_DN_TEMPLATE`, `LDAP_START_TLS`, and `LDAP_ENFORCE_CN_MATCH` carry the meanings above and are passed through into the generated `est-shim.env`. `LDAP_REQUIRE_OPS` is not settable here; it takes the shim default. `DOMAIN` does more here than in the shim, so it gets its own row below.
 
 | Name | Type | Default | Required | Effect |
 |---|---|---|---|---|
+| `DOMAIN` | domain | none | **yes** | Names the lab PKI signing role (dots become dashes) and sets that role's `allowed_domains` (subdomains allowed), so it decides which CNs the quickstart PKI can issue at all — `VS_HOSTNAME` must equal it or be a subdomain of it. Also passed through as the shim's `DOMAIN`. |
 | `BACKEND_HOST` | ip/hostname | none | **yes** | Address the BIG-IP pool member will use to reach the shim — this host's routable address, never `127.0.0.1`. |
 | `BIGIP_HOST` | ip/hostname | none | **yes** | BIG-IP management address for iControl REST. |
 | `BIGIP_USER` | string | none | **yes** | BIG-IP account with rights to create LTM objects and install crypto objects. |

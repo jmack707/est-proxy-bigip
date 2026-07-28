@@ -2,7 +2,8 @@
 """Install a PEM cert/key pair on a BIG-IP as named sys crypto objects,
 optionally attaching them to a client-ssl profile. Used directly for the
 EST proxy VS's own bootstrap certificate (issued straight from OpenBao,
-not via EST -- see README "chicken-and-egg" note), and by quickstart.sh.
+not via EST -- the VS can't enroll through itself; see docs/deploy.md
+Part 2), and by quickstart.sh.
 
 For getting a cert onto a BIG-IP via an actual EST enrollment instead,
 use bigip-est-enroll.py.
