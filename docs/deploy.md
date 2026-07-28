@@ -4,9 +4,7 @@
 
 Last validated: 2026-07 — BIG-IP VE 21.1, OpenBao 2.2.0.
 
-Deploys the BIG-IP objects and, in the fast path, the whole stack: PKI backend, shim, BIG-IP pool/profile/iRule/virtual server, and the virtual server's own bootstrap certificate. Written for a lab or a UDF blueprint. Two parts remain manual in every path: AD or FreeIPA LDAPS setup, and testing with `estclient`.
-
-`DEPLOY-AD.md` at the repository root is the long-form Active Directory walkthrough this page condenses; use it when you need the domain-controller detail.
+Deploys the BIG-IP objects and, in the fast path, the whole stack: PKI backend, shim, BIG-IP pool/profile/iRule/virtual server, and the virtual server's own bootstrap certificate. Written for a lab or a UDF blueprint. Two parts remain manual in every path: directory setup ([AD/LDAPS setup](operations/ad-setup.md)), and testing with `estclient` per [Verification](#verification).
 
 Not in scope: production hardening. TLS to the PKI backend is unverified ([ADR-0005](adr/0005-unverified-tls-to-the-pki-backend.md)) and the fast path uses dev-mode OpenBao ([ADR-0004](adr/0004-dev-mode-openbao-for-lab-bootstrap.md)).
 
@@ -17,7 +15,7 @@ The backend installed and verified ([install](install.md)), or the fast path bel
 - BIG-IP reachable on 443 from wherever you run the scripts, with an account able to create LTM and `sys crypto` objects.
 - A VLAN name for the virtual server, and a listener address on it.
 - A hostname for the virtual server that resolves to that address on your test client, and that satisfies the PKI role's `allowed_domains`.
-- For gated enrolment: LDAPS reachable from the backend host, plus a test user.
+- For gated enrolment: LDAPS reachable from the backend host, plus a test user — on Active Directory this needs DC-side work first, covered in [AD/LDAPS setup](operations/ad-setup.md).
 
 ## Procedure
 

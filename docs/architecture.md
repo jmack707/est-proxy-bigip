@@ -20,6 +20,34 @@ Protocol background, including the trust-anchor bootstrap problem and the full o
 | `bootstrap-openbao-dev.sh`, `docker-compose.yml` | lab host | A PKI backend where none exists |
 | `quickstart.sh` | lab host | Runs the whole sequence from one config file |
 
+The full lab topology, with every hop and port:
+
+```mermaid
+graph LR
+    Client["EST client<br/>(estclient)"]
+
+    subgraph BIGIP["F5 BIG-IP VE"]
+        VS["Virtual server<br/>TLS :8443"]
+        iRule["iRule: est_proxy<br/>method + content-type checks<br/>client-cert check for reenroll<br/>injects X-SSL-Client-* headers"]
+        Pool["Pool: est-backend-pool"]
+        VS --> iRule --> Pool
+    end
+
+    subgraph VM["Linux VM (Docker/Podman)"]
+        Shim["est_shim.py<br/>:8085 plain HTTP"]
+        Bao["OpenBao (dev mode)<br/>:8200 - pki / pki_int"]
+    end
+
+    subgraph DC["Directory server"]
+        AD["FreeIPA / Active Directory<br/>LDAPS :636"]
+    end
+
+    Client -- "HTTPS :8443<br/>TLS, optional client cert" --> VS
+    Pool -- "HTTP :8085" --> Shim
+    Shim -- "LDAPS :636<br/>bind as enrolling user" --> AD
+    Shim -- "HTTP :8200<br/>AppRole login, issue/sign CSR" --> Bao
+```
+
 ## Data flow
 
 A `simpleenroll` with directory authentication, which exercises every hop:
@@ -42,7 +70,7 @@ A `simpleenroll` with directory authentication, which exercises every hop:
 |---|---|---|
 | Client → virtual server | `client-ssl` profile, TLS | Client certificate when offered; HTTP Basic credentials in the `Authorization` header |
 | Virtual server → pool | iRule | Plain HTTP carrying the client's TLS identity as `X-SSL-Client-*` headers |
-| Shim → directory | `ldap3`, LDAPS or STARTTLS | Username and password, as a bind |
+| Shim → directory | `ldap3`, LDAPS or STARTTLS — the directory's certificate is **not validated** | Username and password, as a bind |
 | Shim → PKI backend | AppRole login over HTTPS, certificate **not verified** | AppRole credentials, CSR, issued certificate and, for `serverkeygen`, private key |
 
 Consequences worth stating plainly:
@@ -52,6 +80,7 @@ Consequences worth stating plainly:
 - **The shim holds a credential that can mint certificates.** Scope the AppRole to `ca_chain`, `sign/<role>`, and `issue/<role>` and nothing more, and treat the host or container as a CA-adjacent system.
 - **`serverkeygen` transports a private key** over that cleartext hop.
 - **Enrolment authority comes from the directory**, so the blast radius of a compromised directory account is a certificate for that account's name — narrowed by CN-match enforcement, widened if you disable it.
+- **The shim does not validate the directory's TLS certificate** — `ldap3.Server(..., use_ssl=True)` with no `Tls` object — so it will bind through a spoofed LDAPS endpoint, exposing credentials to an attacker on that path. A lab compromise in the same spirit as [ADR-0005](adr/0005-unverified-tls-to-the-pki-backend.md); the fix is in [AD/LDAPS setup](operations/ad-setup.md#the-shim-does-not-validate-the-directorys-certificate).
 
 ## Constraints and non-goals
 

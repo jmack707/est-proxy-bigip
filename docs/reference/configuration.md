@@ -17,7 +17,7 @@ Precedence inside a container: `--env-file` values are overridden by explicit `-
 
 | Name | Type | Default | Required | Effect |
 |---|---|---|---|---|
-| `BAO_ADDR` | url | `https://127.0.0.1:8200` | no | Vault/OpenBao API base. TLS to this endpoint is **not verified** — see [ADR-0005](../adr/0005-unverified-tls-to-the-pki-backend.md). |
+| `BAO_ADDR` | url | `https://127.0.0.1:8200` | no | Vault/OpenBao API base. TLS to this endpoint is **not verified** — see [ADR-0005](../adr/0005-unverified-tls-to-the-pki-backend.md). Inside a container, `127.0.0.1` is the container itself — when both run under compose, use the service name (`http://openbao:8200`), which is what `quickstart.sh` writes. |
 | `BAO_ROLE_ID` | string | none | **yes** | AppRole `role_id` used for `auth/approle/login`. Absent means the process exits at import. |
 | `BAO_SECRET_ID` | string (**secret**) | none | **yes** | AppRole `secret_id`. Supply from your secret store or `--env-file`; never commit a value. |
 | `PKI_MOUNT` | string | `pki_int` | no | PKI secrets-engine mount path. Used for `<mount>/ca_chain`, `<mount>/sign/<role>`, `<mount>/issue/<role>`. |

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Drives Parts 0, 2, and 3 of DEPLOY-AD.md end-to-end from a single config file:
-# stands up dev-mode OpenBao, configures + starts the EST shim, deploys the
-# BIG-IP objects, and issues + installs the VS's own bootstrap certificate.
+# Drives the deploy fast path (docs/deploy.md) end-to-end from a single
+# config file: stands up dev-mode OpenBao, configures + starts the EST shim,
+# deploys the BIG-IP objects, and issues + installs the VS's own bootstrap
+# certificate. Directory setup (docs/operations/ad-setup.md) and testing
+# with estclient stay manual.
 #
 # Usage:
 #   cp deploy.env.example deploy.env   # fill it in
@@ -129,7 +131,7 @@ cat << EOF
   VS hostname:   $VS_HOSTNAME (make sure it resolves to ${VS_DESTINATION%%:*} wherever you test from)
   CA chain:      $(pwd)/ca-chain.pem
 
-Test it (see DEPLOY-AD.md Part 4 for the full walkthrough):
+Test it (see docs/deploy.md "Verification" for the full set, including the negative cases):
 
   export EST_OPENSSL_CACERT=$(pwd)/ca-chain.pem
   estclient -g -s $VS_HOSTNAME -p ${VS_DESTINATION##*:} -o /tmp/est-out

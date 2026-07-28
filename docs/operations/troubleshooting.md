@@ -291,7 +291,7 @@ The second command needs no token, so it isolates reachability from authenticati
 
 **Fix**
 
-Correct `BAO_ADDR`, `PKI_MOUNT`, or the AppRole credentials, then restart the shim. After a dev-mode restart everything is gone — the mounts, the CA, and the AppRole — so re-run the bootstrap and paste the new credentials in.
+Correct `BAO_ADDR`, `PKI_MOUNT`, or the AppRole credentials, then restart the shim. A shim running in a container cannot reach the backend at `127.0.0.1` — that is the container itself; under compose use the service name (`http://openbao:8200`). After a dev-mode restart everything is gone — the mounts, the CA, and the AppRole — so re-run the bootstrap and paste the new credentials in.
 
 **Prevent recurrence**
 

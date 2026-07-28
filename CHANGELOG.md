@@ -12,8 +12,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ### Changed
 
 - `README.md` reduced to orientation and links; protocol background moved to `docs/est-protocol.md`, procedures to `docs/install.md` and `docs/deploy.md`, and the "gotchas found the hard way" section to `docs/operations/troubleshooting.md` with a symptom index. No operational detail was dropped.
-- `DEPLOY-AD.md` added to the docs lint's scan globs, so the long-form walkthrough is now link- and placeholder-checked like the rest of the documentation.
 - Code comments that pointed at pre-restructure `README.md` sections ("Deploying" step 1, "Gotchas found the hard way", the "chicken-and-egg" note) now point at their `docs/` destinations.
+
+### Removed
+
+- `DEPLOY-AD.md`, dissolved into the docs tree so each instruction has one home: domain-controller LDAPS setup, the test user, the UPN-bind explanation, and the shim's LDAPS-certificate caveat moved to `docs/operations/ad-setup.md`; the topology diagram and the LDAPS caveat's trust-boundary consequence to `docs/architecture.md`; the `BAO_ADDR` container-vs-host note to the configuration reference and the `502` troubleshooting entry. Its OpenBao, shim, BIG-IP, and testing parts duplicated `docs/install.md` and `docs/deploy.md` and were dropped.
 
 ### Fixed
 

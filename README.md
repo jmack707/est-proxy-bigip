@@ -51,7 +51,6 @@ The hop from the virtual server to the shim is cleartext and carries the client'
 | `est-shim.service`, `est-shim.env.example` | systemd unit and configuration template for the host-process path |
 | `Dockerfile`, `docker-compose.yml`, `requirements.txt` | Container path, and a compose stack including the lab PKI |
 | `deploy.env.example` | Single configuration file for `quickstart.sh` |
-| `DEPLOY-AD.md` | Long-form Active Directory / UDF walkthrough |
 
 <!-- doclint:ignore DOC014 -- reports results; the commands that reproduce them live in docs/deploy.md -->
 ## Verification
@@ -78,6 +77,7 @@ Three real bugs were found this way that reading the code would not have caught,
 | [Install](docs/install.md) | prerequisites with tested versions, backend setup, verification |
 | [Deploy](docs/deploy.md) | BIG-IP objects, the fast path, idempotency, rollback |
 | [Upgrade](docs/upgrade.md) | version moves, rollback, teardown |
+| [AD/LDAPS setup](docs/operations/ad-setup.md) | enabling LDAPS on a domain controller, test users, the shim's LDAPS caveat |
 | [Troubleshooting](docs/operations/troubleshooting.md) | symptom-first index of every failure mode found so far |
 | [Runbooks](docs/operations/runbooks/) | certificate renewal, AppRole rotation |
 | [Configuration reference](docs/reference/configuration.md) | every environment variable, its default and effect |
