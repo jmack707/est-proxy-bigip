@@ -1,210 +1,30 @@
 # est-proxy-bigip
 
-Turn an F5 BIG-IP virtual server into an **RFC 7030 (EST) proxy** in front of
-a HashiCorp Vault / OpenBao PKI backend, with optional **FreeIPA or Active
-Directory** client authentication — a working iRule, a minimal, portable
-(containerized) EST server, and a deploy script, verified end-to-end with
-the real Cisco `libest` client (`estclient`), not a curl approximation.
+Turn an F5 BIG-IP virtual server into an **RFC 7030 (EST) proxy** in front of a HashiCorp Vault or OpenBao PKI backend, with optional FreeIPA or Active Directory client authentication — a working iRule, a minimal containerisable EST server, and a deploy script, verified end to end with the real Cisco `libest` client (`estclient`), not a `curl` approximation.
 
-EST (Enrollment over Secure Transport) is the IETF standard for automated
-certificate enrollment used by network devices, IoT, and PKI clients that
-need something more structured than ACME. BIG-IP doesn't speak EST natively;
-this project makes a VS behave like one by terminating/inspecting TLS at the
-iRule layer and translating the RFC 7030 operations to a CA backend.
+## What this is
+
+EST is the IETF standard for automated certificate enrolment used by network devices, IoT, and PKI clients that need something more structured than ACME. BIG-IP does not speak it natively; this project makes a virtual server behave like an EST server by terminating and inspecting TLS at the iRule layer and translating RFC 7030 operations to a CA backend.
+
+It is not a general-purpose EST implementation. `fullcmc` is not implemented, `csrattrs` returns empty, and `serverkeygen` returns data that real clients cannot yet parse. See [constraints and non-goals](docs/architecture.md#constraints-and-non-goals).
 
 ## Quickstart
 
-No existing Vault/OpenBao? No BIG-IP objects deployed yet? One file, one
-script:
+No existing Vault or OpenBao, no BIG-IP objects deployed? One file, one script:
 
-```sh
+```bash
 cp deploy.env.example deploy.env   # fill in your BIG-IP/backend/AD details
 ./quickstart.sh
 ```
 
-This runs the entire stack up to a testable state non-interactively: starts
-a throwaway dev-mode OpenBao, bootstraps its PKI, configures + starts the
-EST shim, deploys the BIG-IP pool/profile/iRule/VS, and issues + installs
-the VS's own bootstrap certificate. Safe to re-run (idempotent). See
-"Getting a BIG-IP its own certificate via EST" and `DEPLOY-AD.md` for what
-it's doing under the hood, and for the still-manual pieces (AD/LDAPS setup,
-testing with `estclient`).
+This runs the stack up to a testable state non-interactively: a throwaway dev-mode OpenBao, its PKI bootstrapped, the EST shim configured and started, the BIG-IP pool, profile, iRule, and virtual server deployed, and the virtual server's own bootstrap certificate issued and installed. Safe to re-run — the OpenBao bootstrap and the BIG-IP deploy are both idempotent.
 
-Validated end-to-end on real infrastructure (not just unit-tested in
-isolation): a full run against a live BIG-IP VE 21.1 and a real FreeIPA
-server, followed by a real `estclient` `cacerts` and LDAP-gated
-`simpleenroll` through the resulting VS, both succeeding. Three real bugs
-were found and fixed this way that would NOT have been caught by reading
-the code — see "Gotchas found the hard way" below for two BIG-IP `tmsh`/
-bash quirks, plus a bash parameter-expansion gotcha specific to this
-script.
-
-## EST overview (RFC 7030)
-
-EST is the IETF's HTTPS-based certificate enrollment protocol — think of it
-as ACME's older, more enterprise/PKI-flavored sibling. It's what a lot of
-network gear (routers, switches, IoT, 802.1X supplicants) uses to get and
-renew certificates from a CA automatically, without a human copying files
-around. Everything below maps directly onto a piece of this project.
-
-**Trust model.** Before a client can talk to an EST server it needs some way
-to trust it — RFC 7030 calls this the "explicit TA database" bootstrap
-problem. Two ways to solve it:
-- *Implicit trust anchor*: the client already has a CA cert it trusts (e.g.
-  baked in at manufacture time, or from a previous enrollment) and uses it
-  to verify the EST server's TLS cert directly.
-- *Explicit trust anchor via `/cacerts`*: the client connects with **some**
-  minimal trust (often just "accept anything for this one bootstrap call"),
-  fetches the CA's cert chain over `GET /cacerts`, and then re-verifies
-  everything from that point on using the freshly-retrieved chain.
-
-  This project's [`est_shim.py`](est_shim.py) implements `/cacerts` by
-  proxying to the CA backend's `ca_chain` endpoint; see gotcha #4 below for
-  why the *server's* leaf cert also has to satisfy a real hostname check —
-  fetching the CA chain doesn't relax that.
-
-**Core operations** (all under `/.well-known/est/`, optionally
-`/.well-known/est/{label}/...` — see "labels" below):
-
-| Operation | Method | Purpose | Client auth |
-|---|---|---|---|
-| `cacerts` | GET | Fetch the CA's cert chain (bootstrap trust, or just refresh it) | none |
-| `csrattrs` | GET | Server tells the client which CSR attributes it wants included (optional, rarely mandatory in practice) | none |
-| `simpleenroll` | POST | Client generates its own keypair + CSR, submits the CSR, gets back a signed cert | none required by the spec (may be gated by TLS client cert, HTTP auth, or a `challengePassword` in the CSR, depending on the deployment — this project gates it with HTTP Basic auth against FreeIPA/AD, see "LDAP authentication" below) |
-| `simplereenroll` | POST | Same as `simpleenroll`, but for renewing a cert the client **already holds** | **mandatory**: the client authenticates the TLS session with its current (possibly expiring) cert |
-| `serverkeygen` | POST | Client asks the *server* to generate the keypair too (not just sign a CSR) — useful for constrained devices that can't do keygen cheaply | same as simpleenroll |
-| `fullcmc` | POST | Full CMC (RFC 5272) request/response instead of the simplified PKCS#10/PKCS#7 flow — used when you need CMC's richer semantics (multi-cert requests, POP linking, etc.) | varies |
-
-  [`est_proxy.irule.tcl`](est_proxy.irule.tcl) enforces the method +
-  content-type rules from this table per-operation, and specifically
-  enforces the `simplereenroll` client-auth requirement by checking
-  `SSL::cert count` and returning `401` before the request ever reaches the
-  backend if no client cert was presented during the TLS handshake — this is
-  the one operation the protocol says the *server* must not skip
-  authentication on. `est_shim.py` implements `cacerts` / `simpleenroll` /
-  `simplereenroll` / `serverkeygen`; `csrattrs` returns an empty response
-  (technically valid — it's optional) and `fullcmc` isn't implemented (CMC
-  is a materially different encoding, out of scope here).
-
-**HTTP transport encoding.** EST bodies aren't sent as raw binary or JSON —
-they use MIME types borrowed from S/MIME:
-- CSRs (`simpleenroll`/`simplereenroll`/`serverkeygen` requests):
-  `Content-Type: application/pkcs10`, body = base64-encoded DER PKCS#10.
-- Certs and CA chains (`cacerts` responses, successful enroll/reenroll
-  responses): `Content-Type: application/pkcs7-mime; smime-type=certs-only`,
-  body = base64-encoded **degenerate PKCS#7** — a `SignedData` structure
-  with no actual signature, just a `certificates` field used as a container
-  to carry one or more X.509 certs. (`est_shim.py`'s `pkcs7_degenerate()`
-  shells out to `openssl crl2pkcs7 -nocrl` to build this — `cryptography`'s
-  Python bindings can't produce a degenerate PKCS#7 directly.)
-- `serverkeygen` responses need to carry back **both** a cert and a private
-  key, so they're `multipart/mixed`: one part `application/pkcs7-mime`
-  (the cert), one part `application/pkcs8` (the key) — see gotcha #5 for the
-  current limitation there.
-- Per spec, all of the above should also carry `Content-Transfer-Encoding:
-  base64`. See gotcha #3 for a real-world parser quirk this triggers.
-
-**Labels / multiple CAs.** RFC 7030 allows an optional path segment —
-`/.well-known/est/{label}/simpleenroll` instead of
-`/.well-known/est/simpleenroll` — so one EST server (or, here, one BIG-IP
-VS) can front multiple distinct CAs/policies by label. `est_proxy.irule.tcl`
-parses this segment and looks it up in a `static::est_label_pools` array,
-routing each label to a different backend pool; `est_shim.py` also parses it
-(currently informational — extending it to select a different PKI mount/role
-per label on the backend side is a natural next step, not yet wired up).
-
-**Adjacent-but-out-of-scope specs**, for context if you go looking: **EST-coaps**
-(RFC 9148) adapts the same operations to CoAP for very constrained
-IoT devices instead of HTTPS; **BRSKI** (RFC 8995) builds a zero-touch
-bootstrapping/ownership-voucher scheme on top of EST for automated device
-onboarding. Neither is implemented here — this project sticks to plain
-HTTPS EST.
-
-## LDAP authentication (FreeIPA / Active Directory)
-
-RFC 7030 deliberately leaves `simpleenroll` client authentication up to the
-deployment — it's the CA operator's job to decide who's allowed to enroll,
-not the protocol's. In most real environments that's a directory service,
-not a bearer token, so `est_shim.py` can gate `simpleenroll` on an **LDAP
-bind** against FreeIPA or Active Directory before it ever talks to the CA
-backend:
-
-1. The EST client sends the request with **HTTP Basic auth**
-   (`estclient -u <user> -h <password> ...` — this maps directly onto
-   libest's built-in support for exactly this).
-2. The shim binds to the directory as that user (`LDAP_BIND_DN_TEMPLATE`,
-   substituting `{username}`) — a **successful bind is treated as
-   authentication**, no separate password check needed, since the bind
-   itself proves the password.
-3. **CN-match enforcement** (`LDAP_ENFORCE_CN_MATCH`, on by default): the
-   shim also checks that the CSR's `CN` matches the authenticated username,
-   so a valid credential for user A can't be used to mint a cert claiming to
-   be user B.
-4. `simplereenroll` is deliberately **not** gated by LDAP — it already has
-   its own authentication (the client's existing TLS cert, enforced by the
-   iRule), and RFC 7030 treats that as sufficient. Layering LDAP on top
-   would just mean checking the same identity twice through two different
-   mechanisms.
-
-Configuration is a bind-DN template, so the same code works against either
-directory — see `est-shim.env.example` for concrete FreeIPA and AD examples.
-No new BIG-IP-side configuration is needed: the iRule already passes the
-`Authorization` header straight through to the pool (it only touches
-`X-SSL-Client-*`).
-
-This was validated against a real FreeIPA server (LDAPS bind, not a mock):
-unauthenticated request → `401`; wrong password → `403`; CSR CN not matching
-the authenticated user → `403`; correct credentials + matching CN → a real
-certificate issued by the CA. The one non-stdlib dependency this adds is
-[`ldap3`](https://ldap3.readthedocs.io/) (pure Python, no `libldap`/`libsasl`
-system packages required) — see `requirements.txt`.
-
-## What's here
-
-- **`est_proxy.irule.tcl`** — the iRule. Enforces RFC 7030 method/
-  content-type rules per operation (`cacerts`, `simpleenroll`,
-  `simplereenroll`, `serverkeygen`, `csrattrs`, `fullcmc`), requires a client
-  certificate for `simplereenroll` (returns `401` before the request reaches
-  the backend if one isn't presented), forwards the client's TLS identity to
-  the backend as `X-SSL-Client-*` headers, and supports routing by an
-  optional EST `{label}` path segment to multiple backend CAs.
-- **`est_shim.py`** — a small Python EST server (one optional dependency:
-  `ldap3`, only needed if `LDAP_ENABLED=true`). Implements `cacerts`/
-  `simpleenroll`/`simplereenroll`/`serverkeygen` by translating to a
-  Vault/OpenBao PKI secrets engine's HTTP API (`issue`/`sign`/`ca_chain`),
-  with optional FreeIPA/AD client authentication (see below). Runs behind
-  the BIG-IP VS over plain HTTP — TLS is terminated at the VS.
-- **`deploy_bigip.py`** — a one-off iControl REST script that creates the
-  BIG-IP pool, a `client-ssl` profile (`peerCertMode: request`), the iRule,
-  and the virtual server (SNAT automap).
-- **`est-shim.service`** / **`est-shim.env.example`** — systemd unit + config
-  template for running the shim as a plain host process.
-- **`Dockerfile`** / **`requirements.txt`** — for running the shim as a
-  container instead (same env-var configuration either way).
-- **`docker-compose.yml`** / **`bootstrap-openbao-dev.sh`** — for
-  environments with no existing Vault/OpenBao instance (e.g. F5 UDF): brings
-  up a throwaway dev-mode OpenBao and wires up its PKI + an AppRole for the
-  shim in one script. See "No existing Vault/OpenBao? (e.g. F5 UDF)" below.
-- **`bigip-est-enroll.py`** — since TMOS has no native EST client, this
-  drives the real `estclient` externally and installs the result onto a
-  target BIG-IP via iControl REST/`tmsh`. Supports both enrollment and
-  RFC 7030 renewal. See "Getting a BIG-IP its own certificate via EST"
-  below.
-- **`bigip_lib.py`** — shared iControl REST helpers (upload a file, run a
-  `tmsh` command, install+attach a cert/key) used by both
-  `bigip-est-enroll.py` and `install-cert-bigip.py`, so the BIG-IP-side
-  logic exists in exactly one place.
-- **`install-cert-bigip.py`** — installs a PEM cert/key pair you already
-  have onto a BIG-IP (not via EST) — used by `quickstart.sh` for the VS's
-  own bootstrap certificate, or standalone for anything else.
-- **`deploy.env.example`** / **`quickstart.sh`** — one config file + one
-  script that runs the whole stack above end-to-end. See "Quickstart" at
-  the top of this file.
+Not production-ready as configured: dev-mode OpenBao is in-memory with a known root token ([ADR-0004](docs/adr/0004-dev-mode-openbao-for-lab-bootstrap.md)), and TLS to the PKI backend is unverified ([ADR-0005](docs/adr/0005-unverified-tls-to-the-pki-backend.md)). Still manual: AD or FreeIPA LDAPS setup, and testing with `estclient` — see [deploy](docs/deploy.md).
 
 ## Topology
 
-```
-EST client --> BIG-IP virtual server (TLS)
+```text
+EST client --> BIG-IP virtual server (TLS terminates here)
                client-ssl profile: peerCertMode=request,
                cert issued by your CA, CN/SAN = the VS hostname
             -> iRule est_proxy (method/content-type checks,
@@ -214,259 +34,57 @@ EST client --> BIG-IP virtual server (TLS)
             -> Vault/OpenBao PKI secrets engine (issue/sign/ca_chain)
 ```
 
-## No existing Vault/OpenBao? (e.g. F5 UDF)
+The hop from the virtual server to the shim is cleartext and carries the client's identity as headers, so it has to stay on a trusted segment — see [trust boundaries](docs/architecture.md#trust-boundaries).
 
-`est_shim.py` talks to any Vault-API-compatible PKI backend — it doesn't
-care whether that's a real production Vault cluster or a five-second
-throwaway instance. If you're building this in an environment like F5 UDF
-that doesn't already have one, `bootstrap-openbao-dev.sh` stands up a
-**dev-mode** OpenBao (in-memory, auto-unsealed, no init/unseal ceremony) and
-wires up a root CA, intermediate CA, signing role, and a scoped AppRole for
-the shim — everything `est_shim.py` needs — in one shot. Every command in
-it was validated against a real OpenBao 2.2.0 instance before being
-committed here, not copied from docs and assumed correct.
+## Components
 
-**This is a lab/demo-only choice, not a production one** — dev mode stores
-everything in memory (nothing survives a restart) and starts with a single,
-known root token. Fine for a UDF blueprint that gets torn down and rebuilt
-regularly; not fine for anything that needs to persist or be trusted beyond
-that.
+| File | Responsibility |
+|---|---|
+| `est_proxy.irule.tcl` | Enforces RFC 7030 method and content-type rules per operation, requires a client certificate for `simplereenroll` before the request reaches the backend, forwards TLS identity as `X-SSL-Client-*` headers, routes by EST label to multiple pools |
+| `est_shim.py` | Minimal EST server; implements `cacerts`, `simpleenroll`, `simplereenroll`, `serverkeygen` against a Vault/OpenBao PKI, with optional FreeIPA/AD authentication. One optional dependency (`ldap3`) |
+| `deploy_bigip.py` | Creates the pool, `client-ssl` profile, iRule, and virtual server over iControl REST. Idempotent |
+| `bigip-est-enroll.py` | Enrols or renews a certificate *for* a BIG-IP by driving the real `estclient`, since TMOS has no EST client ([ADR-0002](docs/adr/0002-external-estclient-bridge-for-bigip-certificates.md)) |
+| `install-cert-bigip.py` | Installs a PEM cert/key pair you already hold, used for the virtual server's own bootstrap certificate |
+| `bigip_lib.py` | Shared iControl REST helpers, so BIG-IP-side logic exists in one place |
+| `bootstrap-openbao-dev.sh` | Stands up a throwaway dev-mode OpenBao with a root CA, intermediate, signing role, and scoped AppRole |
+| `quickstart.sh` | Runs all of the above from a single config file |
+| `est-shim.service`, `est-shim.env.example` | systemd unit and configuration template for the host-process path |
+| `Dockerfile`, `docker-compose.yml`, `requirements.txt` | Container path, and a compose stack including the lab PKI |
+| `deploy.env.example` | Single configuration file for `quickstart.sh` |
+| `DEPLOY-AD.md` | Long-form Active Directory / UDF walkthrough |
 
-```sh
-docker compose up -d openbao          # or: podman run -d --network host \
-                                       #     -e BAO_DEV_ROOT_TOKEN_ID=root \
-                                       #     ghcr.io/openbao/openbao:2.2.0 server -dev
+<!-- doclint:ignore DOC014 -- reports results; the commands that reproduce them live in docs/deploy.md -->
+## Verification
 
-BAO_ADDR=http://127.0.0.1:8200 ./bootstrap-openbao-dev.sh your-domain.com
-# prints BAO_ROLE_ID / BAO_SECRET_ID / PKI_ROLE -- paste them into est-shim.env
+Validated on real infrastructure, not unit-tested in isolation: BIG-IP VE 21.1, OpenBao 2.2.0, and a real FreeIPA server.
 
-curl -s http://127.0.0.1:8200/v1/pki_int/ca_chain > ca-chain.pem
-# this is your EST_OPENSSL_CACERT for testing, and what you issue the VS's
-# own certificate from (see "Deploying" step 3 below)
+- `cacerts` — decoded chain matches the configured root and intermediate.
+- `simpleenroll` — issued certificate verifies clean with `openssl verify`.
+- `simplereenroll` — accepts the previously issued certificate as TLS client identity and returns a fresh one, also verifying clean. A `simplereenroll` with no client certificate is refused with `401` by the iRule, before the backend is reached.
+- `serverkeygen` — backend logic verified with `curl`; the real client's multipart parsing is a known gap.
+- `bootstrap-openbao-dev.sh` — every command run against a fresh OpenBao 2.2.0: root CA, intermediate signed and set, signing role, AppRole, and the resulting credentials serving `cacerts` and `simpleenroll` through a live shim.
+- LDAP authentication — against a real FreeIPA LDAPS bind, not a mock: no credentials `401`, wrong password `403`, CSR CN not matching the authenticated user `403`, correct credentials with matching CN a real certificate. Verified running the shim as a container as well as a host process.
+- `bigip-est-enroll.py` — `enroll`, `renew`, and `--attach-profile` against a real BIG-IP: installed objects match the requested CN, issuer, and SAN; `renew` produces a genuinely new certificate (different fingerprint and expiry, confirmed before and after); the profile's `cert-key-chain` updates to the new objects.
 
-docker compose up -d est-shim
-```
+Three real bugs were found this way that reading the code would not have caught, plus two BIG-IP `tmsh`/bash quirks and a bash parameter-expansion gotcha — all in [troubleshooting](docs/operations/troubleshooting.md).
 
-## Deploying
+## Documentation
 
-1. **Backend**: run `est_shim.py` somewhere reachable from the BIG-IP pool
-   member network, configured (see `est-shim.env.example`) with a Vault/
-   OpenBao AppRole (or any auth method you can adapt `bao_login()` to)
-   scoped to:
-   - `<pki_mount>/ca_chain` (unauthenticated `GET`, no policy needed) — used
-     by `cacerts`.
-   - `<pki_mount>/issue/<role>` (`update`) — used by `serverkeygen`.
-   - `<pki_mount>/sign/<role>` (`update`) — used by `simpleenroll` /
-     `simplereenroll` (signs the client's own CSR, unlike `issue` which
-     generates a fresh keypair).
-
-   and, if you want FreeIPA/AD-gated enrollment, `LDAP_ENABLED=true` +
-   `LDAP_URI`/`LDAP_BIND_DN_TEMPLATE` (see "LDAP authentication" above).
-
-   Two ways to run it:
-   ```sh
-   # plain host process
-   pip install -r requirements.txt   # only strictly needed if LDAP_ENABLED
-   cp est-shim.env.example /etc/est-shim/est-shim.env   # edit it, then:
-   sudo cp est-shim.service /etc/systemd/system/
-   sudo systemctl enable --now est-shim
-
-   # or as a container
-   docker build -t est-shim .
-   docker run -d --name est-shim -p 8085:8085 --env-file est-shim.env est-shim
-   ```
-
-2. **BIG-IP objects**:
-
-   ```sh
-   python3 deploy_bigip.py <bigip-mgmt-host> <user> <password> est_proxy.irule.tcl \
-     --pool-member <backend-host>:8085 --vs-destination <vs-listener-ip>:8443 \
-     [--vs-vlan /Common/<your-vlan>]
-   ```
-
-   No source editing required — everything environment-specific is a flag
-   (`--help` for the full list, including overriding the pool/profile/
-   iRule/VS object names if you want more than one instance side by side).
-   It's also idempotent — objects that already exist are reported and
-   skipped, not errored on; validated by running it twice against a live
-   BIG-IP and confirming the second run reports "already exists" for all
-   four objects.
-
-3. **Give the VS a real leaf certificate from a CA your EST client will
-   trust**, with a CN/SAN matching the hostname you'll connect with. F5's
-   stock self-signed `default.crt` will fail most strict EST clients'
-   hostname verification (see gotcha #4 below) — a self-signed cert with a
-   mismatched CN can never satisfy a hostname check regardless of what's
-   trusted.
-
-## Testing with a real EST client (`estclient`, Debian package `libest-utils`)
-
-```sh
-# EST's bootstrap trust problem: point the client at a CA chain it can pin
-# for the very first connection.
-export EST_OPENSSL_CACERT=/path/to/your-ca-chain.pem
-
-# GET /cacerts
-estclient -g -s <vs-hostname> -p 8443 -o /tmp/est-out
-
-# POST /simpleenroll
-estclient -e -s <vs-hostname> -p 8443 -o /tmp/est-out \
-  --common-name test-client.example.com
-
-# POST /simplereenroll (needs the enrolled cert as TLS client identity;
-# estclient -e writes response bodies as base64 text under names like
-# cert-0-0.pkcs7 -- decode with:
-#   base64 -d cert-0-0.pkcs7 | openssl pkcs7 -inform DER -print_certs > cert.pem
-estclient -r -s <vs-hostname> -p 8443 -o /tmp/est-out \
-  -c /tmp/est-out/cert.pem -k /tmp/est-out/key-x-x.pem
-```
-
-## Getting a BIG-IP its own certificate via EST (`bigip-est-enroll.py`)
-
-You can use this project's EST proxy to obtain a certificate **for a
-BIG-IP** — but note that's different from "BIG-IP enrolls itself via EST."
-**TMOS has no native EST client.** Checked against F5's own docs before
-writing this: `sys crypto cert-order-manager` only integrates with specific
-commercial CA vendor APIs (Symantec's legacy API, Comodo/Sectigo); BIG-IP
-21.1's headline new certificate-automation feature was native **ACMEv2**
-support, introduced because there was *no* built-in automated enrollment
-protocol before that release; EST doesn't appear anywhere in that release's
-notes or in BIG-IP's certificate management docs.
-
-So `bigip-est-enroll.py` is the bridge: it does the real EST exchange
-externally (via `estclient`, the same real client used throughout this
-project — not a hand-rolled approximation), then installs the result onto
-the target BIG-IP the way a human would with `tmsh`, optionally attaching it
-to a client-ssl profile. It supports both enrollment and RFC 7030 renewal
-(`simplereenroll`, reusing the previously issued cert as TLS client
-identity), so it can be the basis of a cron/systemd-timer renewal loop even
-without a native client.
-
-```sh
-# First enrollment
-python3 bigip-est-enroll.py enroll \
-  --est-host <vs-hostname> --est-port 8443 --est-cacert ca-chain.pem \
-  --common-name bigip-a.example.com \
-  --bigip-host <bigip-mgmt-ip> --bigip-user admin --bigip-pass '...' \
-  --cert-name bigip-a-cert --attach-profile <your-clientssl-profile> \
-  --save-dir ./saved
-
-# Renewal (uses simplereenroll, authenticating with the cert saved above)
-python3 bigip-est-enroll.py renew \
-  --est-host <vs-hostname> --est-port 8443 --est-cacert ca-chain.pem \
-  --existing-cert ./saved/bigip-a-cert.pem --existing-key ./saved/bigip-a-cert.key \
-  --bigip-host <bigip-mgmt-ip> --bigip-user admin --bigip-pass '...' \
-  --cert-name bigip-a-cert --attach-profile <your-clientssl-profile>
-```
-
-Validated end-to-end against a real BIG-IP VE 21.1: `enroll` installs a
-fresh `sys crypto cert`/`key` pair with the expected CN, issuer, and SAN;
-`renew` produces a genuinely new certificate (different fingerprint and
-expiration each time, confirmed by inspecting the installed object before
-and after); `--attach-profile` correctly updates a client-ssl profile's
-`cert-key-chain` to reference the new objects.
-
-## Gotchas found the hard way
-
-Found by pulling `src/est/est_client.c` from
-[`cisco/libest`](https://github.com/cisco/libest) and reading the actual
-parsing code rather than guessing:
-
-1. **libest's HTTP status-line parser only accepts `HTTP/1.0`.** A perfectly
-   well-formed `HTTP/1.1` response makes it fail immediately with "Unhandled
-   HTTP response". `est_shim.py` sets `protocol_version = "HTTP/1.0"`.
-2. **A BIG-IP client-ssl profile's `unclean-shutdown` setting (enabled by
-   default on `/Common/clientssl`) skips the TLS `close_notify` alert** as a
-   performance optimization. `curl` tolerates a bare TCP FIN once it's read
-   `Content-Length` bytes; libest's raw `SSL_read` loop does not, and aborts
-   with `unexpected eof while reading` before finishing the response body.
-   Fix: `tmsh modify ltm profile client-ssl <your-profile> unclean-shutdown
-   disabled` — do this on your own profile, not the shared default.
-3. **libest's base64 decode (`b64_decode_cacerts`, also used for enrollment
-   responses) is a raw `BIO_f_base64()`, which requires periodic newlines**
-   — it's built for PEM-style wrapped base64, not one unbroken line.
-   Python's `base64.b64encode()` produces a single line and silently breaks
-   the decode (`create_PKCS7` fails with no OpenSSL error queued at all).
-   Fixed by using `base64.encodebytes()` (76-char MIME wrapping) instead.
-4. **The VS needs a leaf cert with a CN/SAN matching the hostname the client
-   connects with**, issued by a CA the client trusts — not just "any cert
-   the client happens to trust the issuer of." libest's `EST_ERR_FQDN_MISMATCH`
-   check is strict, and F5's stock `default.crt` (`CN=localhost.localdomain`)
-   will always fail it.
-5. **Known gap**: `serverkeygen`'s `multipart/mixed` response is implemented
-   and returns real data, but libest's `multipart_parser.c` doesn't fully
-   accept the current framing (`estclient -q` completes the EST exchange but
-   fails parsing the returned private key back into an OpenSSL key object).
-   `cacerts`/`simpleenroll`/`simplereenroll` are unaffected.
-
-Found while building and validating `quickstart.sh` end-to-end (not by
-inspection — these only showed up under a real run):
-
-6. **Bash's `${VAR:-default}` shorthand mis-parses when `default` itself
-   contains a literal `}`** (e.g. `${LDAP_BIND_DN_TEMPLATE:-{username}}`).
-   Bash's parser closes the expansion at the *first* `}` — right after
-   `username` — and leaves the second `}` as a stray literal character
-   appended to the value. Confirmed empirically (`FOO="a"; echo
-   "${FOO:-{x}}"` prints `a}`, not `a`). This silently corrupted
-   `LDAP_BIND_DN_TEMPLATE` and crashed the shim's LDAP bind with `ValueError:
-   Single '}' encountered in format string`. Fixed by avoiding the shorthand
-   for this one variable (`quickstart.sh` uses an explicit `if [ -z ... ]`
-   instead).
-7. **`tmsh install sys crypto cert/key <name> from-local-file` is not a
-   reliable overwrite** when `<name>` already exists and is attached to a
-   client-ssl profile — re-running against the same name produced a real
-   `profile ... key(...) and certificate(...) do not match` error, i.e. a
-   genuinely broken cert/key pairing on the device, not just a warning.
-   `bigip_lib.install_cert()` now always does a clean detach (repoint the
-   profile to `default.crt`/`default.key` first) → delete → install →
-   reattach, rather than installing over a possibly-existing object in place.
-8. **Rootless Podman containers die when the SSH session that started them
-   ends**, unless the user has `loginctl enable-linger <user>` set — a
-   `docker compose up -d` that looks successful can silently disappear
-   between one command and the next. Worth setting on any host that'll run
-   `quickstart.sh` and then be left unattended (which is the whole point of
-   `-d`).
-
-## Status
-
-Verified end-to-end with the real `estclient` (libest) against a live F5
-BIG-IP VE 21.1 virtual server and a HashiCorp Vault-API-compatible PKI
-backend (OpenBao 2.2.0):
-
-- `cacerts` — decoded CA chain matches the configured root + intermediate.
-- `simpleenroll` — issued certificate verifies clean against the CA chain
-  (`openssl verify`).
-- `simplereenroll` — accepts the simpleenroll-issued cert as TLS client
-  identity, returns a fresh certificate (new serial/validity), also verifies
-  clean. Rejecting a `simplereenroll` with no client cert presented (`401`
-  from the iRule, before the backend is ever reached) is confirmed too.
-- `serverkeygen` — backend logic works (verified with curl); the real EST
-  client's multipart parsing needs more work (see gotcha #5).
-- **`bootstrap-openbao-dev.sh`** — every command run end-to-end against a
-  fresh dev-mode OpenBao 2.2.0 instance: root CA generated, intermediate CA
-  generated + signed + set, signing role created, AppRole created, and the
-  resulting credentials handed to a live `est_shim.py` which successfully
-  served `cacerts` and `simpleenroll` (`openssl verify` clean) using them.
-- **LDAP authentication** — validated against a real FreeIPA server (LDAPS
-  bind, not a mock): unauthenticated `simpleenroll` → `401`; wrong
-  credentials → `403`; correct credentials but CSR CN not matching the
-  authenticated user → `403`; correct credentials + matching CN → real
-  certificate issued. Also validated running the shim as a container
-  (`docker build` / `podman build`), not just as a host process.
-- **`bigip-est-enroll.py`** — `enroll`, `renew`, and `--attach-profile` all
-  validated against a real BIG-IP: installed `sys crypto cert`/`key`
-  objects match the requested CN/issuer/SAN, `renew` produces a genuinely
-  new certificate (different fingerprint + expiration, confirmed before/
-  after), and a client-ssl profile's `cert-key-chain` correctly updates to
-  reference the newly installed objects.
-
-## Deploying with Active Directory (e.g. F5 UDF)
-
-[**`DEPLOY-AD.md`**](DEPLOY-AD.md) is a full walkthrough for a new engineer
-deploying this in an F5 UDF blueprint (BIG-IP + AD + a client VM) — AD-side
-LDAPS setup, standing up OpenBao from scratch since UDF doesn't provide one,
-and testing the whole chain, with a topology diagram.
+| Page | For |
+|---|---|
+| [Architecture](docs/architecture.md) | how the pieces fit, data flow, trust boundaries, non-goals |
+| [EST protocol notes](docs/est-protocol.md) | RFC 7030 background: trust model, operations, encodings, labels |
+| [Decisions](docs/adr/) | why it is built this way, and what each choice costs |
+| [Install](docs/install.md) | prerequisites with tested versions, backend setup, verification |
+| [Deploy](docs/deploy.md) | BIG-IP objects, the fast path, idempotency, rollback |
+| [Upgrade](docs/upgrade.md) | version moves, rollback, teardown |
+| [Troubleshooting](docs/operations/troubleshooting.md) | symptom-first index of every failure mode found so far |
+| [Runbooks](docs/operations/runbooks/) | certificate renewal, AppRole rotation |
+| [Configuration reference](docs/reference/configuration.md) | every environment variable, its default and effect |
+| [CLI reference](docs/reference/cli.md) | every script, flag, and exit code |
+| [API reference](docs/reference/api.md) | endpoints, status codes, content types, and which component enforces what |
+| [Contributing](CONTRIBUTING.md) | development setup, testing expectations, docs standard |
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).
