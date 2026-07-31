@@ -1,0 +1,52 @@
+name: docs-lint
+
+# Fails the pull request when documentation drifts from doc-standard.json.
+# The linter is vendored at .github/scripts/doc_lint.py rather than fetched at
+# run time: the check then works on self-hosted and air-gapped runners and cannot
+# break because an upstream repository moved.
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-lint:
+    name: Documentation standard
+    runs-on: ubuntu-latest
+    # Staged adoption: keep continue-on-error: true for the first few PRs, read the
+    # output, fix or consciously relax doc-standard.json, then remove this line.
+    # continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Lint documentation (annotations)
+        run: python3 .github/scripts/doc_lint.py --format github
+
+      - name: Lint documentation (summary)
+        if: always()
+        run: |
+          python3 .github/scripts/doc_lint.py > docs-lint.txt 2>&1 || true
+          {
+            echo '## Documentation standard'
+            echo '```text'
+            cat docs-lint.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-lint-report
+          path: docs-lint.txt
+          if-no-files-found: ignore

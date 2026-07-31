@@ -175,6 +175,14 @@ class ESTHandler(http.server.BaseHTTPRequestHandler):
             except urllib.error.HTTPError as e:
                 self._send(502, "text/plain", f"OpenBao ca_chain error: {e}".encode())
                 return
+            except urllib.error.URLError as e:
+                # HTTPError covers "the backend answered with an error status".
+                # A backend that is down, or a wrong BAO_ADDR, raises URLError --
+                # HTTPError's parent -- which would otherwise escape and kill the
+                # handler, dropping the connection with no response at all.
+                self._send(502, "text/plain",
+                           f"OpenBao unreachable at {BAO_ADDR}: {e.reason}".encode())
+                return
             self._send(200, "application/pkcs7-mime; smime-type=certs-only",
                        base64.encodebytes(pkcs7_degenerate(pem_chain)),
                        {"Content-Transfer-Encoding": "base64"})
@@ -239,6 +247,10 @@ class ESTHandler(http.server.BaseHTTPRequestHandler):
             except urllib.error.HTTPError as e:
                 self._send(502, "text/plain", f"OpenBao sign error: {e.read()}".encode())
                 return
+            except urllib.error.URLError as e:
+                self._send(502, "text/plain",
+                           f"OpenBao unreachable at {BAO_ADDR}: {e.reason}".encode())
+                return
             cert_pem = signed["data"]["certificate"]
             self._send(200, "application/pkcs7-mime; smime-type=certs-only",
                        base64.encodebytes(pkcs7_degenerate(cert_pem)),
@@ -252,6 +264,10 @@ class ESTHandler(http.server.BaseHTTPRequestHandler):
                                       body={"common_name": cn})
             except urllib.error.HTTPError as e:
                 self._send(502, "text/plain", f"OpenBao issue error: {e.read()}".encode())
+                return
+            except urllib.error.URLError as e:
+                self._send(502, "text/plain",
+                           f"OpenBao unreachable at {BAO_ADDR}: {e.reason}".encode())
                 return
             cert_pem = issued["data"]["certificate"]
             key_pem = issued["data"]["private_key"]

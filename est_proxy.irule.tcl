@@ -78,8 +78,11 @@ when HTTP_REQUEST {
 
     if { [info exists static::est_label_pools($label)] } {
         pool $static::est_label_pools($label)
-    } elseif { [info exists static::est_label_pools("")] } {
-        pool $static::est_label_pools("")
+    } elseif { [info exists static::est_label_pools()] } {
+        # empty index, no quotes: a quoted ("") index is the literal
+        # two-character key "" in Tcl, which never matches the default
+        # entry registered in RULE_INIT
+        pool $static::est_label_pools()
     } else {
         HTTP::respond 404 content "Unknown EST label: $label" noserver
         return

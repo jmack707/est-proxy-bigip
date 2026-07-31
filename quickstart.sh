@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Drives Parts 0-3 of DEPLOY-AD.md end-to-end from a single config file:
-# stands up dev-mode OpenBao, configures + starts the EST shim, deploys the
-# BIG-IP objects, and issues + installs the VS's own bootstrap certificate.
+# Drives the deploy fast path (docs/deploy.md) end-to-end from a single
+# config file: stands up dev-mode OpenBao, configures + starts the EST shim,
+# deploys the BIG-IP objects, and issues + installs the VS's own bootstrap
+# certificate. Directory setup (docs/operations/ad-setup.md) and testing
+# with estclient stay manual.
 #
 # Usage:
 #   cp deploy.env.example deploy.env   # fill it in
@@ -19,7 +21,8 @@ source deploy.env
 
 # Rootless Podman containers die when the session that started them ends,
 # unless the user has lingering enabled -- confirmed empirically, see
-# README "Gotchas found the hard way" #8. Only relevant for Podman (Docker
+# docs/operations/troubleshooting.md ("rootless Podman containers die with
+# the session"). Only relevant for Podman (Docker
 # doesn't have this issue); check + warn rather than silently leaving a
 # stack that disappears the moment this SSH session closes.
 if command -v podman >/dev/null 2>&1 && ! (docker compose version 2>&1 | grep -qi "docker compose version"); then
@@ -107,7 +110,7 @@ python3 deploy_bigip.py "$BIGIP_HOST" "$BIGIP_USER" "$BIGIP_PASS" est_proxy.irul
 
 echo "==> [6/6] Issuing + installing the VS's own bootstrap certificate"
 # Direct from OpenBao, not via EST -- a VS can't use EST through itself for
-# its own first certificate (see README "chicken-and-egg" note).
+# its own first certificate (see docs/deploy.md Part 2).
 TMP_CERT_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_CERT_DIR"' EXIT
 curl -sf -X POST -H "X-Vault-Token: root" \
@@ -128,7 +131,7 @@ cat << EOF
   VS hostname:   $VS_HOSTNAME (make sure it resolves to ${VS_DESTINATION%%:*} wherever you test from)
   CA chain:      $(pwd)/ca-chain.pem
 
-Test it (see DEPLOY-AD.md Part 4 for the full walkthrough):
+Test it (see docs/deploy.md "Verification" for the full set, including the negative cases):
 
   export EST_OPENSSL_CACERT=$(pwd)/ca-chain.pem
   estclient -g -s $VS_HOSTNAME -p ${VS_DESTINATION##*:} -o /tmp/est-out
