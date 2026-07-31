@@ -274,11 +274,14 @@ If a legitimate CN differs from the username by design — a service account enr
 502 OpenBao ca_chain error: ...
 502 OpenBao AppRole login failed: ...
 502 OpenBao sign error: ...
+502 OpenBao unreachable at <BAO_ADDR>: [Errno 111] Connection refused
 ```
 
 **Why it happens**
 
 The shim is running and reachable, but the PKI backend is not: wrong `BAO_ADDR`, backend down, AppRole credentials wrong or expired, or a mount path that does not exist.
+
+The `error:` forms mean the backend answered and refused. The `unreachable at` form means nothing answered at all — the address is wrong or the backend is down. When the shim runs in a container, the most common cause is `BAO_ADDR=http://127.0.0.1:8200`, which points at the shim's own container rather than OpenBao; `bootstrap-openbao-dev.sh` prints that value because it is correct for a host-run shim. Use the compose service name (`http://openbao:8200`) instead — see the [configuration reference](../reference/configuration.md).
 
 **Confirm it is this**
 
