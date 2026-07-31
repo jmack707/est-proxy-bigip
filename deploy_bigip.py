@@ -23,6 +23,17 @@ def die(msg):
     sys.exit(1)
 
 
+def qualify(name):
+    """Return an object name in /Partition/name form.
+
+    Names may be given bare ("clientssl") or already qualified
+    ("/Common/clientssl"). Prefixing unconditionally turns the second form into
+    "/Common/Common/clientssl", which the REST API rejects with a 404 that names
+    a profile nobody asked for.
+    """
+    return name if name.startswith("/") else f"/Common/{name}"
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("host", help="BIG-IP management host/IP")
@@ -97,18 +108,18 @@ def main():
     # 4. Virtual server
     ensure("/mgmt/tm/ltm/virtual", {
         "name": args.vs_name,
-        "destination": f"/Common/{args.vs_destination}",
+        "destination": qualify(args.vs_destination),
         "ipProtocol": "tcp",
-        "pool": f"/Common/{args.pool_name}",
+        "pool": qualify(args.pool_name),
         "sourceAddressTranslation": {"type": "automap"},
         "profiles": [
-            {"name": f"/Common/{args.clientssl_profile}", "context": "clientside"},
+            {"name": qualify(args.clientssl_profile), "context": "clientside"},
             {"name": "/Common/http"},
             {"name": "/Common/tcp"},
         ],
-        "rules": [f"/Common/{args.irule_name}"],
+        "rules": [qualify(args.irule_name)],
         "vlansEnabled": True,
-        "vlans": [args.vs_vlan],
+        "vlans": [qualify(args.vs_vlan)],
     }, f"ltm virtual {args.vs_name}")
 
     print("done")

@@ -80,6 +80,8 @@ python3 deploy_bigip.py <bigip-mgmt-host> <user> <password> est_proxy.irule.tcl 
 | `--irule-name` | optional | `est_proxy` | as above; must match the pool name baked into the iRule's `static::est_label_pools` if you change both |
 | `--vs-name` | optional | `est-proxy-vs` | as above |
 
+Object names may be given bare (`clientssl`) or fully qualified (`/Common/clientssl`, or another partition); both reach the same object. This applies to `--vs-vlan`, `--pool-name`, `--clientssl-profile`, `--irule-name`, and `--vs-destination`. Earlier revisions prefixed `/Common/` unconditionally, so a qualified value became `/Common/Common/...` and failed with a `404` naming an object nobody asked for.
+
 Idempotent: existing objects are reported and skipped rather than erroring. Exit codes: `0` success, `1` validation or API failure with the reason on stderr.
 
 ## `install-cert-bigip.py`

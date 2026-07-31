@@ -20,6 +20,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ### Fixed
 
+- `deploy_bigip.py` prefixed `/Common/` onto object names unconditionally, so a fully qualified value such as `--clientssl-profile /Common/clientssl` became `/Common/Common/clientssl` and failed with `01020036:3: The requested profile ... was not found` — an error naming an object the caller never asked for. Names are now accepted bare or qualified, including partitions other than `/Common`. Affected `--vs-destination`, `--pool-name`, `--clientssl-profile`, and `--irule-name`; `--vs-vlan`, which previously required the qualified form, now takes either.
+
 - `est_proxy.irule.tcl`: the default-pool fallback for unknown EST labels never matched — `static::est_label_pools("")` looks up a literal two-character `""` key in Tcl, not the empty-string key set in `RULE_INIT`, so any label not explicitly in the array got `404` instead of the default pool. Now uses the unquoted empty index.
 
   Validated on BIG-IP VE 21.1.0 build 0.0.38, 2026-07-31, against a standalone unit. `GET /.well-known/est/somelabel/cacerts` returns `200` from the default pool with the fix and `404 Unknown EST label: somelabel` with the pre-fix rule deployed alongside as a control. The unlabelled path was `200` in both, confirming the bug was confined to the fallback branch. Surrounding routing was re-checked on the same unit: non-EST path, unknown operation, and the `405`/`400`/`401` method, content-type, and missing-client-certificate cases all still refuse as documented.
