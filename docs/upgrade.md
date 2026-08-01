@@ -112,6 +112,8 @@ Re-run the negative cases from [deploy](deploy.md#verification). An upgrade that
 
 ## Teardown
 
+If the deployment came from `quickstart.sh`, `./teardown.sh --yes` reverses it from the same `deploy.env`, including the backend containers — see the [CLI reference](reference/cli.md#teardownsh). The manual sequence below is its equivalent, for a hand-built deployment or one whose object names differ from the defaults.
+
 ```bash
 tmsh modify ltm profile client-ssl est-clientssl \
   cert-key-chain replace-all-with { default { cert default.crt key default.key } }
