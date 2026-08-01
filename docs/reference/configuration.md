@@ -28,8 +28,22 @@ Precedence inside a container: `--env-file` values are overridden by explicit `-
 | `LDAP_URI` | url | `ldaps://127.0.0.1:636` | no | Directory endpoint. A `ldaps://` prefix turns on TLS for the connection. |
 | `LDAP_BIND_DN_TEMPLATE` | string | `{username}` | when `LDAP_ENABLED` | Bind DN with `{username}` substituted from HTTP Basic auth. FreeIPA: `uid={username},cn=users,cn=accounts,dc=…`. AD: `{username}@<domain>` (UPN) or `CN={username},CN=Users,DC=…`. |
 | `LDAP_START_TLS` | bool | `false` | no | Upgrade a plain `ldap://` connection with STARTTLS before binding. Irrelevant, and left off, for `ldaps://`. |
-| `LDAP_REQUIRE_OPS` | comma-separated list | `simpleenroll` | no | Which EST operations require a successful bind. `simplereenroll` is deliberately excluded — see [ADR-0001](../adr/0001-terminate-tls-at-the-virtual-server.md). |
-| `LDAP_ENFORCE_CN_MATCH` | bool | `true` | no | Reject when the CSR's CN differs from the authenticated username, so one valid credential cannot mint a certificate naming somebody else. Set `false` only when CNs are intentionally unrelated to usernames — a shared service account enrolling device hostnames, for example. |
+| `LDAP_REQUIRE_OPS` | comma-separated list | `simpleenroll,serverkeygen` | no | Which EST operations require a successful bind. Both issuing operations are in the default; `simplereenroll` is deliberately excluded because it authenticates with the existing certificate over TLS ([ADR-0001](../adr/0001-terminate-tls-at-the-virtual-server.md), [ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md)). |
+| `LDAP_ENFORCE_CN_MATCH` | bool | `true` | no | Reject when the CSR's CN differs from the authenticated username, so one valid credential cannot mint a certificate naming somebody else. The comparison is **exact string equality**, so with this on the username must itself be a name the PKI role will sign — see [troubleshooting](../operations/troubleshooting.md#with-cn-enforcement-on-the-username-is-the-certificate-name) before naming accounts. Set `false` only when CNs are intentionally unrelated to usernames — a shared service account enrolling device hostnames, for example. |
+| `LDAP_CA_FILE` | path | none | no | CA bundle used to verify the directory's TLS certificate. Unset leaves `ldap3` at its `CERT_NONE` default, which encrypts the session without authenticating the server. When set, `LDAP_URI` must use a name the directory's certificate carries — an IP address fails hostname verification. |
+
+## est-shim.env — proxy trust and rate limiting
+
+Added by [ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md) after two bypasses were demonstrated against a live deployment. Defaults are safe; the one value you must set deliberately is `EST_PROXY_SECRET`.
+
+| Name | Type | Default | Required | Effect |
+|---|---|---|---|---|
+| `EST_PROXY_SECRET` | string (**secret**) | none | no, but strongly recommended | Shared secret the `est_proxy` iRule presents as `X-EST-Proxy-Secret`. When set, requests without a matching value are refused `403`. Deploy the same value with [`deploy_bigip.py --proxy-secret`](cli.md#deploy_bigippy). Unset means the shim cannot distinguish a proxied request from one that reached the port directly, and the `X-SSL-Client-*` headers become attacker-supplied. |
+| `REENROLL_VERIFY_CERT` | bool | `true` | no | Verify the forwarded client certificate against the issuing chain on `simplereenroll`, and require the CSR to match it. Setting `false` restores the behaviour in which any request carrying the header is treated as authenticated. |
+| `AUTH_MAX_FAILURES` | int | `5` | no | Failed binds per username inside the window before the shim answers `429` with `Retry-After`. `0` disables. Counted in this process only. |
+| `AUTH_WINDOW_SECONDS` | int | `300` | no | Length of that window. |
+
+The throttle is keyed on the username alone. Behind SNAT every request arrives from one address, so keying on the caller would not separate them — meaning someone who knows a username can hold it throttled. That is deliberate: a local, self-clearing refusal is preferred to lockout of the account in the real directory.
 
 ## deploy.env — quickstart (`quickstart.sh`)
 
@@ -47,6 +61,8 @@ Precedence inside a container: `--env-file` values are overridden by explicit `-
 | `VS_HOSTNAME` | fqdn | none | **yes** | CN/SAN for the virtual server's own bootstrap certificate, and the name `estclient -s` must use. Must resolve to `VS_DESTINATION`'s address on the test client, and must satisfy the PKI role's `allowed_domains` — `quickstart.sh` checks this up front rather than letting the backend fail with an opaque message. |
 
 `quickstart.sh` requires `DOMAIN`, `BACKEND_HOST`, `BIGIP_HOST`, `BIGIP_USER`, `BIGIP_PASS`, `VS_DESTINATION`, `VS_VLAN`, and `VS_HOSTNAME` to be non-empty and exits if any is missing.
+
+`BIGIP_CA_FILE` is read from the environment by `deploy_bigip.py`, `install-cert-bigip.py`, and `bigip-est-enroll.py` (not from `deploy.env`). Set it to a CA bundle that signs the BIG-IP management certificate to verify iControl REST; unset, the management TLS is not verified, which a self-signed BIG-IP needs but which exposes the management channel to a MITM. Verify it in production.
 
 ## bootstrap-openbao-dev.sh environment
 

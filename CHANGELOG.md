@@ -4,6 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Security
+
+- **Unauthenticated certificate issuance via a forged identity header (critical).** `simplereenroll` checked only that `X-SSL-Client-Cert` was present, never that it held a real certificate, and it sits outside `LDAP_REQUIRE_OPS` by design. A request sent straight to `LISTEN_PORT` with a made-up header value and no credentials at all returned `200` and a usable certificate for any name the PKI role allowed. The forwarded certificate is now verified against the issuing chain (`REENROLL_VERIFY_CERT`, on by default), and `EST_PROXY_SECRET` lets the shim refuse anything that did not come through the iRule.
+- **Name binding defeated by subject alternative names (high).** `LDAP_ENFORCE_CN_MATCH` compared only the CN, while the signing role copied CSR SANs into the issued certificate. Since TLS peers validate against SANs, an authenticated client could obtain a certificate naming other principals. SANs are now checked exactly as the CN is, on enrolment and reenrolment, and `bootstrap-openbao-dev.sh` sets `use_csr_sans=false` so the CA refuses them too.
+- **Reenrolment could change the subject.** The CSR must now match the certificate presented: renewal replaces a certificate, it does not grant a new name.
+- **The directory's TLS certificate can now be verified.** `LDAP_CA_FILE` switches `ldap3` to `CERT_REQUIRED`; previously no setting enabled verification, so `ldaps://` encrypted without authenticating the server.
+- **Authentication is rate limited.** `AUTH_MAX_FAILURES` / `AUTH_WINDOW_SECONDS` bound password guessing and the account-lockout denial of service that unthrottled binds enable against a real directory.
+
+- **Command injection as root on the BIG-IP (`bigip_lib.py`).** BIG-IP object names supplied as `--cert-name` / `--attach-profile` were interpolated into `tmsh` commands run through `/mgmt/tm/util/bash`, so a name like `x$(id)` executed as root on the device (confirmed `uid=0`). Names are now validated against `^[A-Za-z0-9._-]+$`. The vector is `$(...)`/backtick command substitution, not `;` — `util/bash` tokenises rather than shell-splits.
+- **iControl REST TLS is now verifiable.** `BIGIP_CA_FILE` turns on full verification of the management channel in `deploy_bigip.py` and `bigip_lib.py`; previously it was unconditionally unverified, exposing the operator password and installed private keys to a MITM.
+- **`quickstart.sh` writes `est-shim.env` as `0600`.** It previously used the default umask, leaving the `BAO_SECRET_ID` — a certificate-signing credential — world-readable on multi-user hosts.
+- **`serverkeygen` is gated by default.** It issues a certificate but was missing from the default `LDAP_REQUIRE_OPS`, so enabling the directory gate still left it open to anyone who could reach the endpoint.
+
+Both bypasses were demonstrated against a live deployment — real Active Directory, real BIG-IP virtual server — and are now regression cases in `test-ldap-gate.sh`. Rationale and trade-offs in [ADR-0008](docs/adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md).
+
 ### Added
 
 - Documentation set under `docs/`: architecture, EST protocol notes, five ADRs, install, deploy, upgrade, symptom-indexed troubleshooting, runbooks for certificate renewal and AppRole rotation, and configuration, CLI, and API references.

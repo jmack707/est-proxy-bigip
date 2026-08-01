@@ -3,6 +3,11 @@ when RULE_INIT {
         "" "/Common/est-backend-pool"
     }
     set static::est_base "/.well-known/est"
+    # Shared secret proving to the backend that a request came through this
+    # iRule. The backend's X-SSL-Client-* headers are only meaningful because
+    # this rule sets them; anything reaching the pool member directly can set
+    # them itself. deploy_bigip.py --proxy-secret substitutes this value.
+    set static::est_proxy_secret ""
 }
 
 when HTTP_REQUEST {
@@ -68,6 +73,12 @@ when HTTP_REQUEST {
     HTTP::header remove "X-SSL-Client-Verify"
     HTTP::header remove "X-SSL-Client-Subject"
     HTTP::header remove "X-SSL-Client-Serial"
+    # Removed before insertion so a client cannot supply its own.
+    HTTP::header remove "X-EST-Proxy-Secret"
+
+    if { $static::est_proxy_secret ne "" } {
+        HTTP::header insert "X-EST-Proxy-Secret" $static::est_proxy_secret
+    }
 
     if { [SSL::cert count] > 0 } {
         HTTP::header insert "X-SSL-Client-Cert"    [URI::encode [X509::whole [SSL::cert 0]]]

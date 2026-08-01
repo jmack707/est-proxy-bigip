@@ -12,6 +12,7 @@ Example:
 import argparse
 import base64
 import json
+import os
 import ssl
 import sys
 import urllib.error
@@ -50,6 +51,9 @@ def main():
     p.add_argument("--clientssl-profile", default="est-clientssl")
     p.add_argument("--irule-name", default="est_proxy")
     p.add_argument("--vs-name", default="est-proxy-vs")
+    p.add_argument("--proxy-secret", default="",
+                   help="shared secret the iRule presents to the backend as "
+                        "X-EST-Proxy-Secret; must equal the shim's EST_PROXY_SECRET")
     args = p.parse_args()
 
     if ":" not in args.pool_member:
@@ -57,9 +61,16 @@ def main():
     if ":" not in args.vs_destination:
         die(f"--vs-destination must be IP:PORT, got '{args.vs_destination}'")
 
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    # Verification is off unless BIGIP_CA_FILE points at a bundle that signs the
+    # management certificate. The management credentials cross this channel, so
+    # verify it in production; a fresh BIG-IP is self-signed, hence the default.
+    ca_file = os.environ.get("BIGIP_CA_FILE", "")
+    if ca_file:
+        ctx = ssl.create_default_context(cafile=ca_file)
+    else:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     auth = base64.b64encode(f"{args.user}:{args.password}".encode()).decode()
 
     def req(method, path, body=None):
@@ -106,6 +117,18 @@ def main():
 
     with open(args.irule_file) as f:
         irule_src = f.read()
+
+    # Substitute the shared secret the iRule presents to the backend. The rule
+    # ships with an empty value, which disables the header; the backend then has
+    # only network isolation distinguishing proxied traffic from direct traffic.
+    if args.proxy_secret:
+        marker = 'set static::est_proxy_secret ""'
+        if marker not in irule_src:
+            die(f"--proxy-secret given but {args.irule_file} has no '{marker}' line to substitute")
+        if '"' in args.proxy_secret or "\\" in args.proxy_secret:
+            die("--proxy-secret must not contain quotes or backslashes (it is inlined into Tcl)")
+        irule_src = irule_src.replace(
+            marker, f'set static::est_proxy_secret "{args.proxy_secret}"', 1)
 
     # 1. Pool. Members are reconciled on an existing pool: a pool that already
     # exists with no member -- from a partial earlier run, or pre-seeded -- would
