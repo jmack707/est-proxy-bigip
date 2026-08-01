@@ -16,6 +16,14 @@ For anything touching the iRule or the BIG-IP scripts you need a real BIG-IP —
 
 Test with the real `estclient` (`apt install libest-utils`), not `curl`. This is not a preference. Three of the bugs recorded in [troubleshooting](docs/operations/troubleshooting.md) pass a `curl` test and fail a real client, because `curl` tolerates a missing TLS `close_notify`, accepts `HTTP/1.1`, and does not use libest's strict base64 decoder.
 
+Changes to `est_proxy.irule.tcl` have a fast offline check that needs only `tclsh`:
+
+```bash
+tclsh tests/irule_test.tcl        # 12 routing cases; exit 1 on any mismatch
+```
+
+It sources the real iRule and stubs the TMM commands, so it catches routing regressions in about a second without a BIG-IP. It is a first filter, not a substitute: stock Tcl is 8.6 where TMM reports 8.4, and TMM's `expr` accepts word operators (`not`, `and`, `or`) that stock Tcl rejects and the harness translates. Passing it does not let a change skip the checks below.
+
 Before opening a pull request:
 
 - `cacerts`, `simpleenroll`, and `simplereenroll` succeed against a live BIG-IP, with the issued certificate verifying clean via `openssl verify`.
