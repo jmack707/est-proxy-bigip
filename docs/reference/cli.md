@@ -2,11 +2,12 @@
 
 ## Overview
 
-Six entry points. Run them in this order the first time:
+Seven entry points. Run them in this order the first time:
 
 | Script | Role |
 |---|---|
 | [`quickstart.sh`](#quickstartsh) | runs the four below end to end from one config file — start here |
+| [`teardown.sh`](#teardownsh) | reverses `quickstart.sh` |
 | [`bootstrap-openbao-dev.sh`](#bootstrap-openbao-devsh) | stands up a throwaway PKI when no Vault/OpenBao exists |
 | [`est_shim.py`](#est_shimpy) | the EST server itself |
 | [`deploy_bigip.py`](#deploy_bigippy) | creates the BIG-IP pool, profile, iRule, and virtual server |
@@ -25,6 +26,34 @@ cp deploy.env.example deploy.env    # fill in every value
 ```
 
 Reads `deploy.env` from the working directory; takes no flags. Re-running is safe: the OpenBao bootstrap and the BIG-IP deploy are both idempotent, and the bootstrap certificate step re-issues a fresh certificate each run. Exits non-zero when a required variable is empty or when `VS_HOSTNAME` falls outside the PKI role's `allowed_domains`.
+
+## `teardown.sh`
+
+Reverses `quickstart.sh`, reading the same `deploy.env` so the two stay in step. Destructive, so it refuses to run without `--yes` and prints what it would remove instead.
+
+```bash
+./teardown.sh --yes                  # BIG-IP objects + backend containers
+./teardown.sh --yes --bigip-only     # leave the backend running
+./teardown.sh --yes --backend-only   # leave the BIG-IP untouched
+./teardown.sh --yes --purge          # also delete est-shim.env and ca-chain.pem
+```
+
+| Flag | Effect |
+|---|---|
+| `--yes` | required; without it the script lists what it would remove and exits `3` |
+| `--bigip-only` | skip `docker compose down -v` |
+| `--backend-only` | skip the BIG-IP objects; `BIGIP_*` need not be set |
+| `--purge` | also delete the generated `est-shim.env` and `ca-chain.pem` |
+
+Object names default to `deploy_bigip.py`'s defaults, which is what `quickstart.sh` deploys. If you deployed with custom names, set `POOL_NAME`, `CLIENTSSL_PROFILE`, `IRULE_NAME`, `VS_NAME`, or `VS_CERT_NAME` in `deploy.env`.
+
+Removal order is not arbitrary: BIG-IP refuses to delete an object that is still referenced, so the virtual server goes first, and the client-ssl profile's `cert-key-chain` is reset to the default pair before the certificate and key it pinned can be deleted. Objects that are already gone are reported and skipped, so a partial teardown can be re-run.
+
+It works over iControl REST using the same management credentials as the deploy — no SSH access to the BIG-IP is needed.
+
+Deliberately left behind: `deploy.env`, and certificates the CA already issued. If the shim pointed at a Vault/OpenBao you run elsewhere, its AppRole `secret_id` remains valid and must be revoked there.
+
+Exit codes: `0` success, `1` missing `deploy.env` or required variable, `2` bad argument, `3` refused for want of `--yes`.
 
 ## `bootstrap-openbao-dev.sh`
 
