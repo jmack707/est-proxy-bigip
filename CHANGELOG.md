@@ -8,6 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 - Documentation set under `docs/`: architecture, EST protocol notes, five ADRs, install, deploy, upgrade, symptom-indexed troubleshooting, runbooks for certificate renewal and AppRole rotation, and configuration, CLI, and API references.
 - `doc-standard.json` plus a `docs-lint` GitHub Action that fails a pull request on missing documents, missing sections, placeholder text, broken relative links, and drift between code and the reference pages.
+- `tests/irule_test.tcl`: an offline regression test for `est_proxy.irule.tcl` covering twelve routing cases, needing only `tclsh` and no BIG-IP. It defines `when` and sources the real iRule rather than a copy, stubbing the TMM commands it calls. Verified to fail — one case, exit `1` — against the pre-fix rule that returned `404` for unknown labels, so it genuinely guards that regression. Its limits are stated in the file and in `CONTRIBUTING.md`: stock Tcl is 8.6 where TMM reports 8.4, and TMM's `expr` word operators (`not`, `and`, `or`) are translated for stock Tcl, so a pass is evidence rather than proof and does not replace validation on hardware.
 
 ### Changed
 
