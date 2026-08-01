@@ -111,7 +111,18 @@ python3 deploy_bigip.py <bigip-mgmt-host> <user> <password> est_proxy.irule.tcl 
 
 Object names may be given bare (`clientssl`) or fully qualified (`/Common/clientssl`, or another partition); both reach the same object. This applies to `--vs-vlan`, `--pool-name`, `--clientssl-profile`, `--irule-name`, and `--vs-destination`. Earlier revisions prefixed `/Common/` unconditionally, so a qualified value became `/Common/Common/...` and failed with a `404` naming an object nobody asked for.
 
-Idempotent: existing objects are reported and skipped rather than erroring. Exit codes: `0` success, `1` validation or API failure with the reason on stderr.
+Re-running is safe, and for two objects it repairs rather than merely reports:
+
+| Object | On a re-run |
+|---|---|
+| pool | members reconciled — a pool that exists without the member gets it |
+| iRule | body reconciled — an edited iRule is actually uploaded |
+| client-ssl profile | reported and left alone: `install-cert-bigip.py` owns its `cert-key-chain`, and a re-run must not disturb the certificate the virtual server is serving |
+| virtual server | reported and left alone: changing the listener or profile set under live traffic is an operator decision, not a side effect of a re-run |
+
+The two reconciled objects are the ones this script owns the contents of. Earlier revisions skipped every existing object, so a pool that already existed stayed memberless and an edited iRule was never uploaded — while the run reported success either way.
+
+Exit codes: `0` success, `1` validation or API failure with the reason on stderr, including an existing object that could not be reconciled.
 
 ## `install-cert-bigip.py`
 

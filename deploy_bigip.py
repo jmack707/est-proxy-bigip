@@ -72,40 +72,76 @@ def main():
         except urllib.error.HTTPError as e:
             return e.code, e.read()
 
-    def ensure(create_path, body, name_for_msg):
+    def obj_path(base, name):
+        """REST path of an existing object: 'est_proxy' -> '<base>/~Common~est_proxy'."""
+        return f"{base}/{qualify(name).replace('/', '~')}"
+
+    def ensure(create_path, body, name_for_msg, converge=None):
+        """Create the object; if it already exists, optionally reconcile it.
+
+        A POST that lands on an existing object is reported and skipped. That
+        is right for objects the deploy creates but does not own the contents
+        of, and wrong for the two it does: the pool's members and the iRule's
+        body. Skipping there leaves a pool with no member, or an iRule that
+        never picks up a new revision -- and because the skip is reported as
+        success, every subsequent run looks fine while the deployment stays
+        broken. `converge` is (path, patch_body) applied on that branch.
+        """
         st, b = req("POST", create_path, body)
         if st in (200, 201):
             print(f"created: {name_for_msg}")
-        elif st == 409 or (st == 400 and b"already exists" in b):
-            print(f"already exists (ok): {name_for_msg}")
-        else:
-            die(f"{name_for_msg}: HTTP {st} {b[:300]}")
+            return
+        if st == 409 or (st == 400 and b"already exists" in b):
+            if converge is None:
+                print(f"already exists (ok): {name_for_msg}")
+                return
+            path, patch = converge
+            pst, pb = req("PATCH", path, patch)
+            if pst in (200, 201):
+                print(f"already exists, reconciled: {name_for_msg}")
+            else:
+                die(f"{name_for_msg}: exists, but reconciling it failed: HTTP {pst} {pb[:300]}")
+            return
+        die(f"{name_for_msg}: HTTP {st} {b[:300]}")
 
     with open(args.irule_file) as f:
         irule_src = f.read()
 
-    # 1. Pool
+    # 1. Pool. Members are reconciled on an existing pool: a pool that already
+    # exists with no member -- from a partial earlier run, or pre-seeded -- would
+    # otherwise stay memberless while the deploy reported success.
+    pool_members = [{"name": args.pool_member, "address": args.pool_member.split(":")[0]}]
     ensure("/mgmt/tm/ltm/pool", {
         "name": args.pool_name,
         "monitor": "tcp",
-        "members": [{"name": args.pool_member, "address": args.pool_member.split(":")[0]}],
-    }, f"ltm pool {args.pool_name}")
+        "members": pool_members,
+    }, f"ltm pool {args.pool_name}",
+        converge=(obj_path("/mgmt/tm/ltm/pool", args.pool_name), {"members": pool_members}))
 
     # 2. Client SSL profile — request (not require) a client cert so simpleenroll/cacerts
     # work without one, and simplereenroll's cert-count check in the iRule enforces its own case.
+    # Deliberately not reconciled: install-cert-bigip.py owns this profile's
+    # cert-key-chain, and re-running the deploy must not disturb the certificate
+    # the virtual server is currently serving.
     ensure("/mgmt/tm/ltm/profile/client-ssl", {
         "name": args.clientssl_profile,
         "defaultsFrom": "/Common/clientssl",
         "peerCertMode": "request",
     }, f"ltm profile client-ssl {args.clientssl_profile}")
 
-    # 3. iRule
+    # 3. iRule. Reconciled on an existing rule, so re-running the deploy after
+    # editing the iRule actually uploads the new body -- which is what the
+    # upgrade procedure relies on.
     ensure("/mgmt/tm/ltm/rule", {
         "name": args.irule_name,
         "apiAnonymous": irule_src,
-    }, f"ltm rule {args.irule_name}")
+    }, f"ltm rule {args.irule_name}",
+        converge=(obj_path("/mgmt/tm/ltm/rule", args.irule_name), {"apiAnonymous": irule_src}))
 
-    # 4. Virtual server
+    # 4. Virtual server. Also not reconciled: changing the listener or the
+    # profile set under live traffic is a decision for an operator, not a
+    # side effect of re-running the deploy. Change it deliberately, or remove
+    # the virtual server and re-run.
     ensure("/mgmt/tm/ltm/virtual", {
         "name": args.vs_name,
         "destination": qualify(args.vs_destination),
