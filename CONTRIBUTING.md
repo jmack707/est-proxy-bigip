@@ -14,7 +14,7 @@ For anything touching the iRule or the BIG-IP scripts you need a real BIG-IP —
 
 ## Testing
 
-Test with the real `estclient` (`apt install libest-utils`), not `curl`. This is not a preference. Three of the bugs recorded in [troubleshooting](docs/operations/troubleshooting.md) pass a `curl` test and fail a real client, because `curl` tolerates a missing TLS `close_notify`, accepts `HTTP/1.1`, and does not use libest's strict base64 decoder.
+Test with the real `estclient`, not `curl`. This is not a preference. Install it with `apt install libest-utils` on Ubuntu 25.10 or newer; on anything older use `./estclient-docker.sh`, which runs the packaged client from a container and takes the same arguments ([ADR-0006](docs/adr/0006-containerised-estclient-for-unpackaged-distros.md)). This is not a preference. Three of the bugs recorded in [troubleshooting](docs/operations/troubleshooting.md) pass a `curl` test and fail a real client, because `curl` tolerates a missing TLS `close_notify`, accepts `HTTP/1.1`, and does not use libest's strict base64 decoder.
 
 Changes to `est_proxy.irule.tcl` have a fast offline check that needs only `tclsh`:
 
@@ -27,8 +27,9 @@ It sources the real iRule and stubs the TMM commands, so it catches routing regr
 Before opening a pull request:
 
 - `cacerts`, `simpleenroll`, and `simplereenroll` succeed against a live BIG-IP, with the issued certificate verifying clean via `openssl verify`.
-- The negative cases still refuse: `simplereenroll` with no client certificate gives `401` from the iRule; with `LDAP_ENABLED=true`, missing credentials give `401`, a wrong password `403`, and a CSR CN not matching the authenticated user `403`.
+- The negative cases still refuse: `simplereenroll` with no client certificate gives `401` from the iRule; with `LDAP_ENABLED=true`, missing credentials give `401`, a wrong password `403`, and a CSR CN not matching the authenticated user `403`. The last three are `./test-ldap-gate.sh`, which runs against the bundled [lab directory fixture](docs/reference/configuration.md#lab-directory-fixture-docker-composelab-ldapyml) if you have no directory of your own — but a passing fixture run does **not** cover Active Directory's UPN bind ([ADR-0007](docs/adr/0007-bundled-lab-directory-for-gate-testing.md)).
 - Anything claimed as validated states the platform versions and the date it was checked.
+- Any check that shells out to `estclient` asserts on the output file, never on `$?` — it returns `0` for a failed exchange ([troubleshooting](docs/operations/troubleshooting.md#estclient-exits-0-on-a-failed-operation)).
 
 Findings discovered empirically are worth more than the fix alone. Record the mechanism and how it was confirmed, so the next person can tell a verified finding from a guess.
 

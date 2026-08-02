@@ -20,6 +20,8 @@ Most entries below were found by running the stack against real infrastructure, 
 | `502 OpenBao ...` | Shim cannot reach or authenticate to the PKI | [502 from the backend](#502-from-the-backend) |
 | `common name ... not allowed by this role` | Requested CN outside the PKI role's `allowed_domains` | [CN refused by the PKI role](#cn-refused-by-the-pki-role) |
 | Gated enrolment refuses every CN a normal username could request | `LDAP_ENFORCE_CN_MATCH` and `allowed_domains` disagree | [with CN enforcement on, the username is the certificate name](#with-cn-enforcement-on-the-username-is-the-certificate-name) |
+| A scripted `estclient` step "succeeds" but produces no certificate | `estclient` returns `0` after a failed exchange | [`estclient` exits 0 on a failed operation](#estclient-exits-0-on-a-failed-operation) |
+| `E: Unable to locate package libest-utils` | Distribution older than Ubuntu 25.10 | [libest-utils is not packaged before Ubuntu 25.10](#libest-utils-is-not-packaged-before-ubuntu-2510) |
 | `403 request did not arrive through the EST proxy` | `EST_PROXY_SECRET` and `--proxy-secret` disagree | [the proxy secret does not match](#the-proxy-secret-does-not-match) |
 | `429 too many failed authentication attempts` | Rate limiter tripped | [authentication is throttled](#authentication-is-throttled) |
 | `LDAP error: socket ssl wrapping error: certificate ...` | `LDAP_CA_FILE` set and `LDAP_URI` uses a name the certificate does not carry | [enabling LDAP verification breaks the bind](#enabling-ldap-verification-breaks-the-bind) |
@@ -508,6 +510,88 @@ Set `LDAP_CA_FILE` to a bundle containing the directory's issuing CA. That switc
 
 Unset, the hop still needs a trusted network path, and directory passwords traverse it. That compounds with the cleartext BIG-IP-to-shim hop in [trust boundaries](../architecture.md#trust-boundaries): a foothold there yields real directory credentials, not just forged identity headers.
 
+## `estclient` exits 0 on a failed operation
+
+**Error text**
+
+None from the shell. `estclient` prints the failure to stdout and still returns success:
+
+```text
+Get CA Cert failed with code 43 (EST_ERR_IP_CONNECT)
+```
+
+**Why it happens**
+
+`estclient` validates its own invocation, but does not map an EST exchange failure onto its exit status. Confirmed empirically against `libest-utils` 3.2.0+ds-1.1 on Ubuntu 26.04, checking `$?` directly for each case:
+
+| Failure | Exit |
+|---|---|
+| No arguments, or a required flag missing (`-g` with no `-s`) | `1` |
+| CA chain named by `EST_OPENSSL_CACERT` does not exist | `1` |
+| Connection refused or unreachable | **`0`** |
+| Enrolment failed | **`0`** |
+| Output directory not writable | **`0`** |
+
+So anything that fails *after* the exchange starts looks like success to a shell, a `Makefile`, or a scheduled job. A failing run also writes nothing to the output directory, which is what makes the check below reliable.
+
+**Confirm it is this**
+
+```bash
+estclient -g -s <vs-hostname> -p 8443 -o /tmp/est-check; echo "exit: $?"
+ls -A /tmp/est-check | wc -l
+```
+
+An `exit: 0` with an empty directory is this.
+
+**Fix**
+
+Test for the artefact, not the exit status. Every verification in this repository already does — `openssl verify` on the issued certificate, and a decodable chain from `cacerts`. In a script:
+
+```bash
+rm -rf /tmp/est-check && mkdir -p /tmp/est-check
+estclient -g -s <vs-hostname> -p 8443 -o /tmp/est-check
+[ -s /tmp/est-check/cacert-0-0.pkcs7 ] || { echo "cacerts failed" >&2; exit 1; }
+```
+
+**Prevent recurrence**
+
+Anything automating `estclient` — including `bigip-est-enroll.py` and the [certificate renewal runbook](runbooks/renew-bigip-certificate.md) — gates on output files rather than the return code.
+
+## libest-utils is not packaged before Ubuntu 25.10
+
+**Error text**
+
+```text
+E: Unable to locate package libest-utils
+```
+
+**Why it happens**
+
+`libest-utils` first appears in Ubuntu 25.10 (questing), and is also in 26.04 LTS and 26.10, at `3.2.0+ds-1.1` in `universe`. No earlier release carries it in any component, so `add-apt-repository universe` changes nothing and the failure reads like a broken repository configuration.
+
+**Confirm it is this**
+
+```bash
+. /etc/os-release && echo "$VERSION_ID"
+apt-cache policy libest-utils
+```
+
+A `VERSION_ID` below `25.10`, with no candidate, is this.
+
+**Fix**
+
+Use the containerised client, which needs nothing on the host but a container runtime:
+
+```bash
+export EST_OPENSSL_CACERT=$PWD/ca-chain.pem
+export ESTCLIENT_ADD_HOST=<vs-hostname>:<vs-listener-ip>
+./estclient-docker.sh -g -s <vs-hostname> -p 8443 -o /out
+```
+
+**Prevent recurrence**
+
+[ADR-0006](../adr/0006-containerised-estclient-for-unpackaged-distros.md). Building libest from source is the other option and is deliberately not the documented one: it needs a toolchain and `LD_LIBRARY_PATH` juggling, and yields a binary whose version nobody records.
+
 ## CN refused by the PKI role
 
 **Error text**
@@ -529,3 +613,11 @@ curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/$PKI_MOUNT/roles/$PKI_ROLE"
 **Fix**
 
 Request a CN inside the allowed domain, or widen the role. `quickstart.sh` checks `VS_HOSTNAME` against `DOMAIN` before deploying, so this fails early with a clear message instead of opaquely at issuance.
+
+The same rule applies to subject alternative names, with a different message:
+
+```text
+subject alternate name lab-ldap not allowed by this role
+```
+
+A short hostname is not inside `allowed_domains` even when the fully-qualified form is, so request FQDNs and reach the host by that name. This is why the [lab directory fixture](../reference/configuration.md#lab-directory-fixture-docker-composelab-ldapyml) carries a network alias of its full name rather than a short one.

@@ -14,7 +14,7 @@ Do not use it once the certificate has already expired. `simplereenroll` present
 
 | Need | Detail |
 |---|---|
-| Host | The workstation or job host with `estclient` installed (`apt install libest-utils`) |
+| Host | The workstation or job host with `estclient` installed — `apt install libest-utils` on Ubuntu 25.10+, otherwise `./estclient-docker.sh` and a container runtime ([ADR-0006](../../adr/0006-containerised-estclient-for-unpackaged-distros.md)) |
 | Files | The current certificate and key PEMs from the previous run's `--save-dir` |
 | Trust | CA chain PEM for `--est-cacert` |
 | Access | BIG-IP account able to install `sys crypto` objects and modify the `client-ssl` profile |
@@ -29,11 +29,14 @@ Do not use it once the certificate has already expired. `simplereenroll` present
    openssl x509 -in ./saved/<object-name>.pem -noout -subject -enddate -fingerprint
    ```
 
-2. Confirm the EST endpoint is healthy before relying on it:
+2. Confirm the EST endpoint is healthy before relying on it. Check the output file, not the exit status — `estclient` returns `0` after a failed exchange ([troubleshooting](../troubleshooting.md#estclient-exits-0-on-a-failed-operation)), so a scheduled job that trusts `$?` will run on against a dead endpoint:
 
    ```bash
    export EST_OPENSSL_CACERT=/path/to/ca-chain.pem
+   rm -rf /tmp/est-renew-check && mkdir -p /tmp/est-renew-check
    estclient -g -s <vs-hostname> -p 8443 -o /tmp/est-renew-check
+   [ -s /tmp/est-renew-check/cacert-0-0.pkcs7 ] \
+     || { echo "EST endpoint unhealthy; stopping" >&2; exit 1; }
    ```
 
 3. Renew and install. `--attach-profile` is the step that changes what the device serves:

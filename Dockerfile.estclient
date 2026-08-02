@@ -1,0 +1,22 @@
+# Cisco libest `estclient`, for hosts whose distribution does not package it.
+# libest-utils first appears in Ubuntu 25.10 (questing); 24.04 and earlier have
+# no such package in any component. See ADR-0006.
+ARG BASE_IMAGE=ubuntu:26.04
+FROM ${BASE_IMAGE}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libest-utils \
+      openssl \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Conventional mount points, referenced by estclient-docker.sh and the docs:
+#   /out         writable output directory (estclient -o /out)
+#   /ca-chain.pem  CA chain, exported as EST_OPENSSL_CACERT
+ENV EST_OPENSSL_CACERT=/ca-chain.pem
+WORKDIR /out
+
+# estclient has no --help flag; invoked with no arguments it prints its usage
+# and exits 1, which is the useful default here.
+ENTRYPOINT ["estclient"]
