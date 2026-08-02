@@ -76,7 +76,7 @@ A `simpleenroll` with directory authentication, which exercises every hop:
 Consequences worth stating plainly:
 
 - **TLS terminates at the virtual server.** The path from there to the shim is cleartext HTTP, so it must stay on a network segment you trust. Anything able to reach `LISTEN_PORT` directly bypasses every check the iRule performs, including the mandatory client certificate for `simplereenroll`.
-- **Client identity is asserted by header** past the virtual server. That is only safe because the iRule strips inbound copies first; a second path to the shim that skips the iRule would let a client forge its own identity.
+- **Client identity is asserted by header** past the virtual server. The iRule strips inbound copies, but that only binds identity for traffic that goes through the iRule. The backend therefore verifies rather than assumes: `EST_PROXY_SECRET` establishes that a request was proxied, and the forwarded certificate is checked against the issuing chain on `simplereenroll`. Both were added after these assumptions were demonstrated exploitable — see [ADR-0008](adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md). SAN names are enforced alongside the CN, since TLS peers validate against SANs.
 - **The shim holds a credential that can mint certificates.** Scope the AppRole to `ca_chain`, `sign/<role>`, and `issue/<role>` and nothing more, and treat the host or container as a CA-adjacent system.
 - **`serverkeygen` transports a private key** over that cleartext hop.
 - **Enrolment authority comes from the directory**, so the blast radius of a compromised directory account is a certificate for that account's name — narrowed by CN-match enforcement, widened if you disable it.
@@ -101,3 +101,4 @@ Consequences worth stating plainly:
 | [ADR-0003](adr/0003-http-1-0-and-wrapped-base64-for-libest.md) | Serve `HTTP/1.0` with line-wrapped base64 for libest compatibility |
 | [ADR-0004](adr/0004-dev-mode-openbao-for-lab-bootstrap.md) | Use dev-mode OpenBao for lab bootstrap, and say so loudly |
 | [ADR-0005](adr/0005-unverified-tls-to-the-pki-backend.md) | Accept unverified TLS to the PKI backend, scoped to lab use |
+| [ADR-0008](adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md) | Verify proxy-supplied identity at the backend instead of assuming the iRule is in the path |

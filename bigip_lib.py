@@ -6,6 +6,8 @@ Stdlib only.
 """
 import base64
 import json
+import os
+import re
 import ssl
 import sys
 import urllib.error
@@ -17,10 +19,48 @@ def die(msg):
     sys.exit(1)
 
 
-def bigip_client(host, user, password):
+# tmsh commands are assembled by interpolation and run through
+# /mgmt/tm/util/bash, i.e. `bash -c "<command>"` on the device. A value
+# carrying shell metacharacters -- notably `$(...)` or backticks, which the
+# earlier `;`-based reasoning misses because util/bash tokenises rather than
+# shell-splits -- executes as root on the BIG-IP. Names that reach a tmsh
+# string must therefore be constrained to what a BIG-IP object name can
+# actually be. This matters most for automated enrolment, where the name may
+# derive from a device identity rather than an operator's keystroke.
+_BIGIP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def valid_bigip_name(name):
+    return bool(name) and len(name) <= 128 and _BIGIP_NAME_RE.match(name) is not None
+
+
+def require_bigip_name(name, what):
+    if not valid_bigip_name(name):
+        die(f"illegal {what}: {name!r} -- only letters, digits, dot, underscore "
+            f"and hyphen are allowed (max 128 chars)")
+
+
+def bigip_ssl_context():
+    """TLS context for iControl REST.
+
+    Verification is off by default because a fresh BIG-IP presents a
+    self-signed management certificate, and the operator credentials plus, in
+    install_cert, a private key cross this channel. Set BIGIP_CA_FILE to a
+    bundle that signs the management certificate to turn on full verification;
+    that is the production posture and this is the lab default.
+    """
+    ca_file = os.environ.get("BIGIP_CA_FILE", "")
+    if ca_file:
+        ctx = ssl.create_default_context(cafile=ca_file)
+        return ctx  # check_hostname and CERT_REQUIRED are the defaults here
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def bigip_client(host, user, password):
+    ctx = bigip_ssl_context()
     auth = base64.b64encode(f"{user}:{password}".encode()).decode()
 
     def req(method, path, data=None, extra_headers=None, ctype="application/json"):
@@ -77,6 +117,12 @@ def install_cert(bigip_host, bigip_user, bigip_pass, cert_name, cert_pem, key_pe
     install: detach the profile from the old objects first (BIG-IP won't
     let you delete a cert/key that's in use), delete them, then install
     fresh and reattach."""
+    # cert_name and attach_profile are interpolated into tmsh strings that run
+    # as root on the device; refuse anything that is not a plain object name.
+    require_bigip_name(cert_name, "certificate name")
+    if attach_profile is not None:
+        require_bigip_name(attach_profile, "profile name")
+
     req = bigip_client(bigip_host, bigip_user, bigip_pass)
 
     if attach_profile:

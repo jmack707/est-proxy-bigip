@@ -41,7 +41,11 @@ print(json.dumps({'certificate': sys.argv[1]}))
 " "$CERT" | api -X POST -d @- "$BAO_ADDR/v1/pki_int/intermediate/set-signed" >/dev/null
 
 echo "==> Creating signing role '$ROLE' (allowed_domains=$DOMAIN)"
-api -X POST -d "{\"allowed_domains\":\"$DOMAIN\",\"allow_subdomains\":true,\"max_ttl\":\"720h\"}" \
+# use_csr_sans=false: without it the CA copies whatever SANs a CSR asks for into
+# the issued certificate. Since TLS peers validate against SANs, that lets an
+# authenticated client obtain a certificate naming somebody else, defeating
+# LDAP_ENFORCE_CN_MATCH. The shim rejects such CSRs too; this is the second layer.
+api -X POST -d "{\"allowed_domains\":\"$DOMAIN\",\"allow_subdomains\":true,\"max_ttl\":\"720h\",\"use_csr_sans\":false}" \
   "$BAO_ADDR/v1/pki_int/roles/$ROLE" >/dev/null
 
 echo "==> Enabling AppRole auth + est-shim policy + role"

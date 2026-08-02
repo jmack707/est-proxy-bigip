@@ -19,6 +19,11 @@ Most entries below were found by running the stack against real infrastructure, 
 | `403 CSR CN ... does not match authenticated LDAP user` | CN-match enforcement | [401, 403, and which component refused](#401-403-and-which-component-refused) |
 | `502 OpenBao ...` | Shim cannot reach or authenticate to the PKI | [502 from the backend](#502-from-the-backend) |
 | `common name ... not allowed by this role` | Requested CN outside the PKI role's `allowed_domains` | [CN refused by the PKI role](#cn-refused-by-the-pki-role) |
+| Gated enrolment refuses every CN a normal username could request | `LDAP_ENFORCE_CN_MATCH` and `allowed_domains` disagree | [with CN enforcement on, the username is the certificate name](#with-cn-enforcement-on-the-username-is-the-certificate-name) |
+| `403 request did not arrive through the EST proxy` | `EST_PROXY_SECRET` and `--proxy-secret` disagree | [the proxy secret does not match](#the-proxy-secret-does-not-match) |
+| `429 too many failed authentication attempts` | Rate limiter tripped | [authentication is throttled](#authentication-is-throttled) |
+| `LDAP error: socket ssl wrapping error: certificate ...` | `LDAP_CA_FILE` set and `LDAP_URI` uses a name the certificate does not carry | [enabling LDAP verification breaks the bind](#enabling-ldap-verification-breaks-the-bind) |
+| `ERROR: illegal certificate name` | `--cert-name`/`--attach-profile` contains characters outside a plain object name | [a certificate or profile name is refused](#a-certificate-or-profile-name-is-refused) |
 
 ## libest rejects the HTTP status line
 
@@ -299,6 +304,209 @@ Correct `BAO_ADDR`, `PKI_MOUNT`, or the AppRole credentials, then restart the sh
 **Prevent recurrence**
 
 Dev mode being in-memory is the usual cause of a stack that worked yesterday. That is a property of the choice, not a fault ([ADR-0004](../adr/0004-dev-mode-openbao-for-lab-bootstrap.md)).
+
+## With CN enforcement on, the username is the certificate name
+
+**Error text**
+
+Either of these, depending on which rule loses:
+
+```text
+403 CSR CN 'alice.example.com' does not match authenticated LDAP user 'alice'
+502 OpenBao sign error: common name alice not allowed by this role
+```
+
+**Why it happens**
+
+Two rules apply at once and they constrain each other:
+
+- `est_shim.py` compares the CSR's CN to the authenticated username with **exact string equality** — `if cn != ldap_username`. Not a prefix, not the first label.
+- The PKI role refuses any CN outside its `allowed_domains`.
+
+Together these mean the directory username must itself be a name the role will sign. A user called `alice` can never enrol: CN `alice` matches the username but the CA refuses it, and CN `alice.example.com` satisfies the CA but not the username check.
+
+**Confirm it is this**
+
+```bash
+grep -n -B4 'does not match authenticated' est_shim.py
+curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/$PKI_MOUNT/roles/$PKI_ROLE" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["allowed_domains"])'
+```
+
+**Fix**
+
+Name the login accounts after the certificates they will hold — `client1.example.com`, not `client1`. That is coherent for device enrolment, where the account *is* the device. Verified end to end against Active Directory and against the bundled fixture.
+
+On Active Directory, **bind by `userPrincipalName` and let `sAMAccountName` be derived** — do not set `sAMAccountName` to the certificate name:
+
+```powershell
+New-ADUser -Name "est-client1" `
+  -UserPrincipalName "client1.corp.example.com@corp.example.com" `
+  -AccountPassword $pw -Enabled $true
+```
+
+The default `LDAP_BIND_DN_TEMPLATE` of `{username}@<domain>` binds by UPN, so `sAMAccountName` plays no part in the bind or in the CN comparison. It only has to be unique.
+
+This matters because `sAMAccountName` is capped at 20 characters while a UPN prefix is not. Setting it to the certificate name imports a limit that otherwise does not apply — `client1.f5lab.local` is 19 and fits, but a longer host label or domain will not, and the rejection is
+
+```text
+The name provided is not a properly formed account name
+```
+
+which never mentions length and reads like a character-validity problem. Verified against a live domain controller: a **40-character** UPN prefix authenticated and enrolled cleanly end to end, while a 21-character `sAMAccountName` was refused outright.
+
+One more Active Directory default to expect: **password complexity** requires three of four character classes, so a lab password like `estlab123` is refused at account creation and looks like a script bug rather than a policy rejection.
+
+The alternative is `LDAP_ENFORCE_CN_MATCH=false`, which decouples the two rules — and means one valid credential can request a certificate naming anything the role allows. Choose it deliberately, not to make an error go away.
+
+## A certificate or profile name is refused
+
+**Error text**
+
+```text
+ERROR: illegal certificate name: 'x$(id)' -- only letters, digits, dot,
+underscore and hyphen are allowed (max 128 chars)
+```
+
+**Why it happens**
+
+`install-cert-bigip.py` and `bigip-est-enroll.py` build `tmsh` commands by interpolating the object name, and those commands run through `/mgmt/tm/util/bash` — a root shell on the device. A name outside `^[A-Za-z0-9._-]+$` is rejected up front, because such a name could otherwise execute commands on the BIG-IP: `util/bash` tokenises its argument rather than shell-splitting it, so `;` is inert but `$(...)` and backticks inside the command still evaluate.
+
+**Confirm it is this**
+
+The value you passed to `--cert-name` or `--attach-profile` contains something other than letters, digits, dot, underscore or hyphen — often a space, slash, or a shell metacharacter picked up from an upstream device inventory.
+
+**Fix**
+
+Use a plain BIG-IP object name. If the name is derived from a device identity in automation, sanitise it to the same character class before calling these tools — do not route around the check.
+
+**Prevent recurrence**
+
+[ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md), addendum. The guard lives in `bigip_lib.require_bigip_name`, so both cert tools share it.
+
+## The proxy secret does not match
+
+**Error text**
+
+```text
+403 request did not arrive through the EST proxy
+```
+
+**Why it happens**
+
+The shim has `EST_PROXY_SECRET` set and the request did not carry a matching `X-EST-Proxy-Secret`. Either it reached the listener without going through the virtual server — which is the case this check exists to refuse — or the iRule was deployed without the value, or with a different one.
+
+**Confirm it is this**
+
+```bash
+curl -sk -u admin:<password> \
+  "https://<bigip-mgmt-ip>/mgmt/tm/ltm/rule/~Common~est_proxy" \
+  | python3 -c 'import sys,json; print([l.strip() for l in json.load(sys.stdin)["apiAnonymous"].splitlines() if "est_proxy_secret" in l])'
+```
+
+An empty string in `set static::est_proxy_secret ""` means the iRule sends no header at all.
+
+**Fix**
+
+Redeploy the iRule with the value the shim expects. The two are set independently and must agree:
+
+```bash
+python3 deploy_bigip.py <bigip-mgmt-host> <user> <password> est_proxy.irule.tcl \
+  --pool-member <backend-host>:8085 --vs-destination <vs-listener-ip>:8443 \
+  --proxy-secret "<same value as EST_PROXY_SECRET>"
+```
+
+**Prevent recurrence**
+
+[ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md). Testing the shim directly needs the secret too — `test-ldap-gate.sh` takes it as `EST_PROXY_SECRET`.
+
+## Authentication is throttled
+
+**Error text**
+
+```text
+429 too many failed authentication attempts; try again later
+```
+
+with a `Retry-After` header.
+
+**Why it happens**
+
+`AUTH_MAX_FAILURES` failed binds for that username inside `AUTH_WINDOW_SECONDS`. The counter is per username and per shim process, and a correct password during the window is refused too — that is what makes it a throttle rather than a hint.
+
+**Confirm it is this**
+
+```bash
+docker logs est-shim 2>&1 | grep throttled
+```
+
+**Fix**
+
+Wait out the window, or restart the shim to clear the counters in a lab. If a legitimate client trips it repeatedly, it is retrying with a stale password — fix the client rather than raising the limit.
+
+**Prevent recurrence**
+
+Because every gated enrolment is a live directory bind, the alternative to throttling here is lockout of the account in the real directory. The trade, including why the counter is not keyed on the client address, is in [ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md).
+
+## Enabling LDAP verification breaks the bind
+
+**Error text**
+
+```text
+403 LDAP authentication failed: LDAP error: socket ssl wrapping error:
+certificate {'subject': ((('commonName', 'dc-f5lab.f5lab.local'),),) ...
+```
+
+**Why it happens**
+
+Setting `LDAP_CA_FILE` turns on full verification, which includes checking the hostname in `LDAP_URI` against the directory certificate. Domain controller certificates issued by ADCS carry the DC's FQDN as a DNS SAN and no IP SAN, so an `LDAP_URI` pointing at an IP address fails — correctly. Before `LDAP_CA_FILE` existed the same URI worked, because nothing was verified.
+
+**Confirm it is this**
+
+```bash
+openssl s_client -connect <dc-ip>:636 </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -ext subjectAltName
+```
+
+Compare those names with the host part of `LDAP_URI`.
+
+**Fix**
+
+Use a name the certificate carries, and make sure the shim can resolve it:
+
+```bash
+LDAP_URI=ldaps://dc-f5lab.f5lab.local:636
+```
+
+In a container add `--add-host <dc-fqdn>:<dc-ip>`, since the container does not inherit the host's `/etc/hosts`.
+
+**Prevent recurrence**
+
+Verified both ways during [ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md): the correct CA with the FQDN authenticates, and a deliberately wrong CA is refused.
+
+## The shim does not verify the directory's TLS certificate
+
+**Error text**
+
+None. That is the problem — an invalid or substituted LDAPS certificate is accepted silently.
+
+**Why it happens**
+
+`est_shim.py` builds its connection as `ldap3.Server(LDAP_URI, use_ssl=...)` with no `Tls` object. `ldap3` defaults to `validate=ssl.CERT_NONE`, so `ldaps://` encrypts the session but does not authenticate the server. There is no configuration setting that turns verification on.
+
+**Confirm it is this**
+
+```bash
+grep -n 'ldap3.Server' est_shim.py
+```
+
+A `Server(...)` call with no `tls=Tls(validate=...)` argument is this.
+
+**Fix**
+
+Set `LDAP_CA_FILE` to a bundle containing the directory's issuing CA. That switches `ldap3` to `CERT_REQUIRED`, which also verifies the hostname — so `LDAP_URI` must name the directory the way its certificate does, not by IP ([above](#enabling-ldap-verification-breaks-the-bind)).
+
+Unset, the hop still needs a trusted network path, and directory passwords traverse it. That compounds with the cleartext BIG-IP-to-shim hop in [trust boundaries](../architecture.md#trust-boundaries): a foothold there yields real directory credentials, not just forged identity headers.
 
 ## CN refused by the PKI role
 

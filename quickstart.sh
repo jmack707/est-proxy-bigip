@@ -84,6 +84,9 @@ echo "==> [3/6] Writing est-shim.env"
 if [ -z "${LDAP_BIND_DN_TEMPLATE:-}" ]; then LDAP_BIND_DN_TEMPLATE='{username}'; fi
 : "${LDAP_START_TLS:=false}"
 : "${LDAP_ENFORCE_CN_MATCH:=true}"
+# est-shim.env holds BAO_SECRET_ID, a credential that can sign certificates.
+# Create it unreadable to other users before writing anything into it.
+( umask 077; : > est-shim.env )
 cat > est-shim.env << EOF
 BAO_ADDR=http://openbao:8200
 BAO_ROLE_ID=$BAO_ROLE_ID
@@ -99,6 +102,7 @@ LDAP_START_TLS=$LDAP_START_TLS
 LDAP_REQUIRE_OPS=simpleenroll
 LDAP_ENFORCE_CN_MATCH=$LDAP_ENFORCE_CN_MATCH
 EOF
+chmod 600 est-shim.env   # unconditional: a pre-existing file keeps its old mode through truncation
 
 echo "==> [4/6] Starting the EST shim"
 docker compose up -d --build est-shim

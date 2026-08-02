@@ -2,7 +2,7 @@
 
 ## Overview
 
-Seven entry points. Run them in this order the first time:
+Eight entry points. Run them in this order the first time:
 
 | Script | Role |
 |---|---|
@@ -13,6 +13,7 @@ Seven entry points. Run them in this order the first time:
 | [`deploy_bigip.py`](#deploy_bigippy) | creates the BIG-IP pool, profile, iRule, and virtual server |
 | [`install-cert-bigip.py`](#install-cert-bigippy) | installs a PEM cert/key pair you already hold |
 | [`bigip-est-enroll.py`](#bigip-est-enrollpy) | obtains a certificate *for* a BIG-IP via a real EST exchange |
+| [`test-ldap-gate.sh`](#test-ldap-gatesh) | asserts the directory gate refuses what it should |
 
 `bigip_lib.py` is a shared iControl REST helper module, not an entry point; it is imported by the two cert-installing scripts.
 
@@ -108,6 +109,7 @@ python3 deploy_bigip.py <bigip-mgmt-host> <user> <password> est_proxy.irule.tcl 
 | `--clientssl-profile` | optional | `est-clientssl` | as above |
 | `--irule-name` | optional | `est_proxy` | as above; must match the pool name baked into the iRule's `static::est_label_pools` if you change both |
 | `--vs-name` | optional | `est-proxy-vs` | as above |
+| `--proxy-secret` | optional | empty | Substituted into the iRule as `static::est_proxy_secret` and sent to the backend as `X-EST-Proxy-Secret`. Must equal the shim's `EST_PROXY_SECRET` ([ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md)). Rejected if it contains quotes or backslashes, since it is inlined into Tcl |
 
 Object names may be given bare (`clientssl`) or fully qualified (`/Common/clientssl`, or another partition); both reach the same object. This applies to `--vs-vlan`, `--pool-name`, `--clientssl-profile`, `--irule-name`, and `--vs-destination`. Earlier revisions prefixed `/Common/` unconditionally, so a qualified value became `/Common/Common/...` and failed with a `404` naming an object nobody asked for.
 
@@ -143,6 +145,8 @@ python3 install-cert-bigip.py --bigip-host <bigip-mgmt-ip> --bigip-user admin \
 
 Installing over an existing object name is handled by a detach → delete → install → reattach sequence rather than an in-place overwrite; the reason is in the [troubleshooting guide](../operations/troubleshooting.md#reinstalling-a-cert-over-an-existing-name-breaks-the-certkey-pairing).
 
+`--cert-name` and `--attach-profile` must be plain BIG-IP object names (`^[A-Za-z0-9._-]+$`); anything else is refused, because these names are interpolated into `tmsh` commands that run as root on the device ([ADR-0008](../adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md), addendum). Set `BIGIP_CA_FILE` to verify the management TLS.
+
 ## `bigip-est-enroll.py`
 
 Performs a real EST exchange with `estclient`, then installs the result on a BIG-IP. Needs the `estclient` binary (`apt install libest-utils`) and reachability to both the EST virtual server and the BIG-IP management interface.
@@ -176,3 +180,42 @@ python3 bigip-est-enroll.py renew \
 | `--attach-profile` | no | update this profile's `cert-key-chain` |
 
 For the scheduled version of this, see the [certificate renewal runbook](../operations/runbooks/renew-bigip-certificate.md).
+
+## `test-ldap-gate.sh`
+
+Runs the four assertions [contributing](../../CONTRIBUTING.md) requires of a gated deployment, and exits non-zero on the first mismatch so it is usable in CI. Requires `LDAP_ENABLED=true`; against an ungated deployment every case returns `200` and the run fails, which is the correct answer.
+
+```bash
+./test-ldap-gate.sh                                    # straight at the shim
+EST_URL=https://<vs-hostname>:8443 ./test-ldap-gate.sh  # through the virtual server
+```
+
+| Case | Expected |
+|---|---|
+| No credentials | `401` |
+| Wrong password | `403` |
+| CSR CN naming another user | `403` |
+| Correct credentials, matching CN | `200`, and the body must decode as PKCS#7 |
+
+The last check matters for the same reason `estclient`'s exit code cannot be trusted: a `200` alone does not prove a certificate came back.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `EST_URL` | `http://127.0.0.1:8085` | Target. The shim directly isolates the gate from the BIG-IP; the virtual server exercises the whole path |
+| `EST_USER` / `EST_PASS` | `client1.example.com` / `estlab123` | Credentials expected to succeed. The username is FQDN-shaped because CN matching compares it to the certificate name exactly |
+| `EST_OTHER_USER` | `bob` | A different seeded user, used for the CN-mismatch case |
+| `EST_DOMAIN` | `example.com` | Domain the requested CNs sit under; must satisfy the PKI role's `allowed_domains` |
+| `CURL_OPTS` | `-sk` | Passed to every request. `-k` is there for the virtual server's lab certificate |
+| `EST_PROXY_SECRET` | unset | Sent as `X-EST-Proxy-Secret`. Needed only for the shim-direct mode when the shim runs with a secret configured; through the virtual server the iRule supplies it |
+
+Usernames are FQDN-shaped because the shim compares the CN to the username with exact equality while the CA independently requires the CN to sit inside `allowed_domains` — both hold only when the username *is* the certificate name. That interaction, and the Active Directory limits on it, are in [troubleshooting](../operations/troubleshooting.md#with-cn-enforcement-on-the-username-is-the-certificate-name).
+
+Against Active Directory, pass the UPN prefix as the username and mind the password policy:
+
+```bash
+EST_URL=https://<vs-hostname>:8443 \
+EST_USER=client1.f5lab.local EST_PASS='<complex-password>' \
+EST_OTHER_USER=client2.f5lab.local \
+CURL_OPTS="-sk --resolve <vs-hostname>:8443:<vs-ip>" \
+./test-ldap-gate.sh
+```
