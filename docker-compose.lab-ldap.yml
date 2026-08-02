@@ -1,0 +1,34 @@
+# Lab directory fixture. NOT part of the default stack and NOT a production
+# directory — see ADR-0007 for what it does and does not prove.
+#
+#   ./lab-ldap/gen-cert.sh
+#   docker compose -f docker-compose.yml -f docker-compose.lab-ldap.yml \
+#     --profile lab-ldap up -d
+#
+# The profile keeps it out of a plain `docker compose up`, so nobody starts a
+# directory by accident.
+
+services:
+  lab-ldap:
+    image: glauth/glauth:v2.5.2
+    container_name: lab-ldap
+    profiles: ["lab-ldap"]
+    restart: unless-stopped
+    volumes:
+      - ./lab-ldap/glauth.cfg:/app/config/config.cfg:ro
+      - ./lab-ldap/ldap.crt:/app/config/ldap.crt:ro
+      - ./lab-ldap/ldap.key:/app/config/ldap.key:ro
+    networks:
+      default:
+        aliases:
+          # The shim reaches the fixture by this name, which must match the CN
+          # in lab-ldap/ldap.crt. A normally-scoped PKI role will not issue a
+          # bare `lab-ldap` SAN, so the FQDN is what gets verified.
+          # Change together with LDAP_CN in gen-cert.sh and the baseDN in
+          # lab-ldap/glauth.cfg if your DOMAIN differs.
+          - lab-ldap.example.com
+    ports:
+      # Published for debugging with ldapsearch from the host. The shim reaches
+      # the fixture over the compose network and does not need these.
+      - "3893:3893"   # ldap://
+      - "3894:3894"   # ldaps://

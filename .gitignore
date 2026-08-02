@@ -4,3 +4,9 @@ est-shim.env
 *.crt
 *.pkcs7
 __pycache__/
+lab-ldap/ldap.crt
+lab-ldap/ldap.key
+deploy.env
+est-shim.env.hardened
+ad-ca.pem
+est-out/

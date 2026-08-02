@@ -50,6 +50,9 @@ The hop from the virtual server to the shim is cleartext and carries the client'
 | `quickstart.sh` | Runs all of the above from a single config file |
 | `est-shim.service`, `est-shim.env.example` | systemd unit and configuration template for the host-process path |
 | `Dockerfile`, `docker-compose.yml`, `requirements.txt` | Container path, and a compose stack including the lab PKI |
+| `Dockerfile.estclient`, `estclient-docker.sh` | Runs the libest `estclient` from a container, for hosts with no `libest-utils` package ([ADR-0006](docs/adr/0006-containerised-estclient-for-unpackaged-distros.md)) |
+| `docker-compose.lab-ldap.yml`, `lab-ldap/` | Throwaway LDAP fixture so the directory gate can be exercised without a real directory — lab-only, off by default ([ADR-0007](docs/adr/0007-bundled-lab-directory-for-gate-testing.md)) |
+| `test-ldap-gate.sh` | Asserts the gate refuses: no credentials `401`, wrong password `403`, CN mismatch `403`, correct credentials a real certificate |
 | `deploy.env.example` | Single configuration file for `quickstart.sh` |
 
 <!-- doclint:ignore DOC014 -- reports results; the commands that reproduce them live in docs/deploy.md -->
@@ -79,7 +82,7 @@ Three real bugs were found this way that reading the code would not have caught,
 | [Upgrade](docs/upgrade.md) | version moves, rollback, teardown |
 | [AD/LDAPS setup](docs/operations/ad-setup.md) | enabling LDAPS on a domain controller, test users, the shim's LDAPS caveat |
 | [Troubleshooting](docs/operations/troubleshooting.md) | symptom-first index of every failure mode found so far |
-| [Runbooks](docs/operations/runbooks/) | certificate renewal, AppRole rotation |
+| [Runbooks](docs/operations/runbooks/) | first install, certificate renewal, AppRole rotation |
 | [Configuration reference](docs/reference/configuration.md) | every environment variable, its default and effect |
 | [CLI reference](docs/reference/cli.md) | every script, flag, and exit code |
 | [API reference](docs/reference/api.md) | endpoints, status codes, content types, and which component enforces what |

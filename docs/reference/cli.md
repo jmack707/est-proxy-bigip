@@ -2,7 +2,7 @@
 
 ## Overview
 
-Eight entry points. Run them in this order the first time:
+Nine entry points. Run them in this order the first time:
 
 | Script | Role |
 |---|---|
@@ -13,6 +13,7 @@ Eight entry points. Run them in this order the first time:
 | [`deploy_bigip.py`](#deploy_bigippy) | creates the BIG-IP pool, profile, iRule, and virtual server |
 | [`install-cert-bigip.py`](#install-cert-bigippy) | installs a PEM cert/key pair you already hold |
 | [`bigip-est-enroll.py`](#bigip-est-enrollpy) | obtains a certificate *for* a BIG-IP via a real EST exchange |
+| [`estclient-docker.sh`](#estclient-dockersh) | runs the libest `estclient` from a container, for hosts with no `libest-utils` package |
 | [`test-ldap-gate.sh`](#test-ldap-gatesh) | asserts the directory gate refuses what it should |
 
 `bigip_lib.py` is a shared iControl REST helper module, not an entry point; it is imported by the two cert-installing scripts.
@@ -181,6 +182,34 @@ python3 bigip-est-enroll.py renew \
 
 For the scheduled version of this, see the [certificate renewal runbook](../operations/runbooks/renew-bigip-certificate.md).
 
+## `estclient-docker.sh`
+
+Runs the packaged libest `estclient` from a container, for hosts whose distribution has no `libest-utils` — anything before Ubuntu 25.10 ([ADR-0006](../adr/0006-containerised-estclient-for-unpackaged-distros.md)). Arguments pass straight through, so it substitutes for the binary in every command in this repository. Builds the image on first use.
+
+```bash
+export EST_OPENSSL_CACERT=$PWD/ca-chain.pem
+export ESTCLIENT_ADD_HOST=<vs-hostname>:<vs-listener-ip>
+
+./estclient-docker.sh -g -s <vs-hostname> -p 8443 -o /out
+
+./estclient-docker.sh -e -s <vs-hostname> -p 8443 -o /out \
+  -x /out/<client>.key --common-name <client-fqdn>
+```
+
+Container paths are fixed: `/out` is the output directory, `/ca-chain.pem` the trust chain. Keep client keys and certificates in the output directory so `-x`, `-c`, and `-k` can reach them as `/out/<name>`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `EST_OPENSSL_CACERT` | `$PWD/ca-chain.pem` | CA chain on the host; mounted read-only and re-exported inside the container. Exits `2` when the file is missing |
+| `ESTCLIENT_OUT` | `$PWD/est-out` | Host directory mounted at `/out`; created if absent |
+| `ESTCLIENT_ADD_HOST` | unset | `hostname:ip` passed to `--add-host`. Required when the virtual server name is not in DNS — the container does not inherit the host's `/etc/hosts` |
+| `ESTCLIENT_IMAGE` | `estclient-tool` | Image tag to build and run |
+| `ESTCLIENT_BASE_IMAGE` | `ubuntu:26.04` | Base image. Any release carrying `libest-utils`. Podman hosts without `unqualified-search-registries` need the fully-qualified `docker.io/library/ubuntu:26.04` |
+| `ESTCLIENT_REBUILD` | `0` | `1` forces a rebuild even when the image exists |
+| `CONTAINER_CLI` | `docker` | Set to `podman` where that is the runtime |
+
+Exit codes: `2` for a missing container runtime or missing CA chain, otherwise whatever `estclient` returned — which is not a reliable success signal. See [`estclient` exits 0 on a failed operation](../operations/troubleshooting.md#estclient-exits-0-on-a-failed-operation).
+
 ## `test-ldap-gate.sh`
 
 Runs the four assertions [contributing](../../CONTRIBUTING.md) requires of a gated deployment, and exits non-zero on the first mismatch so it is usable in CI. Requires `LDAP_ENABLED=true`; against an ungated deployment every case returns `200` and the run fails, which is the correct answer.
@@ -202,8 +231,8 @@ The last check matters for the same reason `estclient`'s exit code cannot be tru
 | Variable | Default | Effect |
 |---|---|---|
 | `EST_URL` | `http://127.0.0.1:8085` | Target. The shim directly isolates the gate from the BIG-IP; the virtual server exercises the whole path |
-| `EST_USER` / `EST_PASS` | `client1.example.com` / `estlab123` | Credentials expected to succeed. The username is FQDN-shaped because CN matching compares it to the certificate name exactly |
-| `EST_OTHER_USER` | `bob` | A different seeded user, used for the CN-mismatch case |
+| `EST_USER` / `EST_PASS` | `client1.example.com` / `estlab123` | Credentials expected to succeed. Defaults match the [lab directory fixture](configuration.md#lab-directory-fixture-docker-composelab-ldapyml); the username is FQDN-shaped because CN matching compares it to the certificate name exactly |
+| `EST_OTHER_USER` | `client2.example.com` | A different seeded user, used for the CN-mismatch case |
 | `EST_DOMAIN` | `example.com` | Domain the requested CNs sit under; must satisfy the PKI role's `allowed_domains` |
 | `CURL_OPTS` | `-sk` | Passed to every request. `-k` is there for the virtual server's lab certificate |
 | `EST_PROXY_SECRET` | unset | Sent as `X-EST-Proxy-Secret`. Needed only for the shim-direct mode when the shim runs with a secret configured; through the virtual server the iRule supplies it |
@@ -219,3 +248,6 @@ EST_OTHER_USER=client2.f5lab.local \
 CURL_OPTS="-sk --resolve <vs-hostname>:8443:<vs-ip>" \
 ./test-ldap-gate.sh
 ```
+
+`lab-ldap/gen-cert.sh` issues the fixture's LDAPS certificate and is described with the fixture in the [configuration reference](configuration.md#lab-directory-fixture-docker-composelab-ldapyml).
+

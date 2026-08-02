@@ -101,4 +101,6 @@ Consequences worth stating plainly:
 | [ADR-0003](adr/0003-http-1-0-and-wrapped-base64-for-libest.md) | Serve `HTTP/1.0` with line-wrapped base64 for libest compatibility |
 | [ADR-0004](adr/0004-dev-mode-openbao-for-lab-bootstrap.md) | Use dev-mode OpenBao for lab bootstrap, and say so loudly |
 | [ADR-0005](adr/0005-unverified-tls-to-the-pki-backend.md) | Accept unverified TLS to the PKI backend, scoped to lab use |
+| [ADR-0006](adr/0006-containerised-estclient-for-unpackaged-distros.md) | Ship a containerised `estclient` for distributions that do not package it |
+| [ADR-0007](adr/0007-bundled-lab-directory-for-gate-testing.md) | Bundle a lab directory so the gate can be tested, and be explicit about what it does not prove |
 | [ADR-0008](adr/0008-do-not-trust-proxy-supplied-identity-unconditionally.md) | Verify proxy-supplied identity at the backend instead of assuming the iRule is in the path |

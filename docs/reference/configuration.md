@@ -64,6 +64,40 @@ The throttle is keyed on the username alone. Behind SNAT every request arrives f
 
 `BIGIP_CA_FILE` is read from the environment by `deploy_bigip.py`, `install-cert-bigip.py`, and `bigip-est-enroll.py` (not from `deploy.env`). Set it to a CA bundle that signs the BIG-IP management certificate to verify iControl REST; unset, the management TLS is not verified, which a self-signed BIG-IP needs but which exposes the management channel to a MITM. Verify it in production.
 
+## Lab directory fixture (`docker-compose.lab-ldap.yml`)
+
+A throwaway LDAP server for exercising the directory gate where no directory exists. **Lab-only**, off by default, and it deliberately proves less than it appears to — read [ADR-0007](../adr/0007-bundled-lab-directory-for-gate-testing.md) before relying on a passing run.
+
+```bash
+./lab-ldap/gen-cert.sh
+docker compose -f docker-compose.yml -f docker-compose.lab-ldap.yml \
+  --profile lab-ldap up -d
+```
+
+Seeded users are `client1.example.com` and `client2.example.com`, both with password `estlab123`, as SHA-256 hashes committed in `lab-ldap/glauth.cfg`. That is safe only because this is a fixture, on the same reasoning as dev-mode OpenBao's known root token.
+
+Point the shim at it with the existing variables — the fixture introduces none of its own:
+
+| Variable | Value for the fixture |
+|---|---|
+| `LDAP_ENABLED` | `true` |
+| `LDAP_URI` | `ldaps://lab-ldap.example.com:3894` |
+| `LDAP_BIND_DN_TEMPLATE` | `uid={username},cn=users,cn=accounts,dc=example,dc=com` |
+| `LDAP_START_TLS` | `false` — the fixture serves LDAPS directly |
+
+Three names must agree if you change the domain: the `baseDN` and user entries in `lab-ldap/glauth.cfg`, the network alias in `docker-compose.lab-ldap.yml`, and `LDAP_CN` in `lab-ldap/gen-cert.sh`.
+
+`lab-ldap/gen-cert.sh` issues the LDAPS certificate from the lab CA so the fixture is reached over *verified* TLS rather than with verification disabled:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BAO_ADDR` | `http://127.0.0.1:8200` | CA to request the certificate from |
+| `BAO_TOKEN` | `root` | Dev-mode root token ([ADR-0004](../adr/0004-dev-mode-openbao-for-lab-bootstrap.md)) |
+| `PKI_MOUNT` / `PKI_ROLE` | `pki_int` / `example-dot-com` | Mount and signing role |
+| `LDAP_CN` | `lab-ldap.example.com` | CN and the name the shim connects to. Must satisfy the role's `allowed_domains` |
+
+It falls back to a self-signed certificate when the CA is unreachable and says so. A verifying LDAP client rejects that, so start the CA first rather than working around it.
+
 ## bootstrap-openbao-dev.sh environment
 
 | Name | Type | Default | Required | Effect |

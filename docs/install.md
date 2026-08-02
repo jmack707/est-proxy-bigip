@@ -4,7 +4,7 @@ Installs the EST backend (`est_shim.py`) and the operator tooling. BIG-IP object
 
 ## Prerequisites
 
-Last validated: 2026-07 — BIG-IP VE 21.1, OpenBao 2.2.0, FreeIPA (LDAPS), `estclient` from `libest-utils`.
+Last validated: 2026-07 — BIG-IP VE 21.1, OpenBao 2.2.0, FreeIPA (LDAPS), `estclient` from `libest-utils` 3.2.0+ds-1.1 on Ubuntu 26.04.
 
 Versions in the first column are what the project has been validated against, not minimums pulled from a compatibility matrix.
 
@@ -16,7 +16,8 @@ Versions in the first column are what the project has been validated against, no
 | Python (container) | 3.12-slim | Base image in the `Dockerfile` |
 | `openssl` CLI | distribution default | **Hard dependency** — PKCS#7 degenerate packaging and CSR parsing shell out to it |
 | `ldap3` | `>=2.9,<3` | Only when `LDAP_ENABLED=true`. Pure Python, so no `libldap` or `libsasl` packages |
-| `estclient` | libest | Only for testing and for `bigip-est-enroll.py`. Debian/Ubuntu: `apt install libest-utils` |
+| `estclient` | libest 3.2.0 | Only for testing and for `bigip-est-enroll.py`. `apt install libest-utils` requires **Ubuntu 25.10 or newer** — no earlier release packages it. Older hosts use the container path below ([ADR-0006](adr/0006-containerised-estclient-for-unpackaged-distros.md)) |
+| Container runtime | Docker, or Podman | Only for the containerised `estclient` on hosts without the package |
 | Directory | FreeIPA, or Active Directory with LDAPS | Optional; only for gated enrolment |
 
 Network reachability: BIG-IP pool member network → backend host on `LISTEN_PORT` (default `8085`, plain HTTP); backend → PKI backend on its API port; backend → directory on 636 or 389; operator workstation → BIG-IP management interface on 443.
@@ -54,12 +55,21 @@ Every setting is documented in the [configuration reference](reference/configura
 
 ### 3. Install the operator tooling
 
-On the workstation that will run enrolments:
+On the workstation that will run enrolments. Native package first — it needs Ubuntu 25.10 or newer:
 
 ```bash
-sudo apt install libest-utils            # provides estclient
+sudo apt install libest-utils            # provides estclient; Ubuntu 25.10+
 python3 --version                        # 3.9+
 ```
+
+On anything older, `apt` reports `E: Unable to locate package libest-utils` and adding `universe` does not help, because no earlier release carries it. Run the packaged client from a container instead — the wrapper builds the image on first use and passes arguments straight through ([ADR-0006](adr/0006-containerised-estclient-for-unpackaged-distros.md)):
+
+```bash
+export EST_OPENSSL_CACERT=$PWD/ca-chain.pem
+./estclient-docker.sh -g -s <vs-hostname> -p 8443 -o /out
+```
+
+Paths inside the container are fixed: `/out` is the output directory, `/ca-chain.pem` the trust chain. Set `ESTCLIENT_ADD_HOST=<vs-hostname>:<vs-listener-ip>` when the hostname is not in DNS — the container has its own `/etc/hosts` and does not inherit the one you edited. Full flag and variable table in the [CLI reference](reference/cli.md#estclient-dockersh).
 
 ## Verification
 
